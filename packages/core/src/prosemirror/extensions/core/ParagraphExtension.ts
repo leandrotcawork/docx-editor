@@ -281,6 +281,7 @@ const paragraphNodeSpec: NodeSpec = {
     outlineLevel: { default: null },
     bookmarks: { default: null },
     _originalFormatting: { default: null },
+    _resolvedFormatting: { default: null },
     _sectionProperties: { default: null },
   },
   parseDOM: [
@@ -430,6 +431,42 @@ function setParagraphAttrsCmd(attrs: Record<string, unknown>): Command {
 export interface ResolvedStyleAttrs {
   paragraphFormatting?: ParagraphFormatting;
   runFormatting?: TextFormatting;
+}
+
+function removeUndefinedProperties<T extends object>(value: T): T | undefined {
+  const entries = Object.entries(value).filter(([, entryValue]) => entryValue !== undefined);
+  return entries.length > 0 ? (Object.fromEntries(entries) as T) : undefined;
+}
+
+function resolvedFormattingForAppliedStyle(
+  styleId: string,
+  resolvedAttrs: ResolvedStyleAttrs,
+  attrs: Record<string, unknown>
+): ParagraphFormatting | undefined {
+  const ppr = resolvedAttrs.paragraphFormatting;
+  return removeUndefinedProperties({
+    styleId,
+    alignment: ppr?.alignment,
+    numPr: ppr?.numPr,
+    pageBreakBefore: ppr?.pageBreakBefore,
+    bidi: ppr?.bidi,
+    spaceBefore: ppr?.spaceBefore,
+    spaceAfter: ppr?.spaceAfter,
+    lineSpacing: ppr?.lineSpacing,
+    lineSpacingRule: ppr?.lineSpacingRule,
+    indentLeft: ppr?.indentLeft,
+    indentRight: ppr?.indentRight,
+    indentFirstLine: ppr?.indentFirstLine,
+    hangingIndent: ppr?.hangingIndent,
+    borders: ppr?.borders,
+    shading: ppr?.shading,
+    tabs: ppr?.tabs,
+    keepNext: ppr?.keepNext,
+    keepLines: ppr?.keepLines,
+    contextualSpacing: ppr?.contextualSpacing,
+    outlineLevel: ppr?.outlineLevel,
+    runProperties: resolvedAttrs.runFormatting ?? (attrs.defaultTextFormatting as TextFormatting | undefined),
+  });
 }
 
 // ============================================================================
@@ -598,6 +635,12 @@ function makeApplyStyle(schema: Schema) {
             newAttrs.keepLines = ppr?.keepLines ?? null;
             newAttrs.pageBreakBefore = ppr?.pageBreakBefore ?? null;
             newAttrs.outlineLevel = ppr?.outlineLevel ?? null;
+            newAttrs.defaultTextFormatting = resolvedAttrs.runFormatting ?? null;
+            newAttrs._resolvedFormatting = resolvedFormattingForAppliedStyle(
+              styleId,
+              resolvedAttrs,
+              newAttrs
+            );
           }
 
           tr = tr.setNodeMarkup(pos, undefined, newAttrs);

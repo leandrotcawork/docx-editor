@@ -156,6 +156,33 @@ function makePercentWidthTableDoc() {
   ]);
 }
 
+function makeThreeColumnPercentWidthTableDoc() {
+  return schema.nodes.doc.create(null, [
+    schema.nodes.table.create(
+      {
+        width: 5000,
+        widthType: 'pct',
+      },
+      [
+        schema.nodes.tableRow.create(null, [
+          schema.nodes.tableCell.create(
+            { width: 33, widthType: 'pct' },
+            schema.nodes.paragraph.create(null, schema.text('A'))
+          ),
+          schema.nodes.tableCell.create(
+            { width: 33, widthType: 'pct' },
+            schema.nodes.paragraph.create(null, schema.text('B'))
+          ),
+          schema.nodes.tableCell.create(
+            { width: 34, widthType: 'pct' },
+            schema.nodes.paragraph.create(null, schema.text('C'))
+          ),
+        ]),
+      ]
+    ),
+  ]);
+}
+
 function makePercentWidthTableWithGridDoc() {
   return schema.nodes.doc.create(null, [
     schema.nodes.table.create(
@@ -276,6 +303,14 @@ function topLevelBlockTypes(doc: ReturnType<typeof schema.node>): string[] {
   return types;
 }
 
+function tableCount(doc: ReturnType<typeof schema.node>): number {
+  let count = 0;
+  doc.descendants((node) => {
+    if (node.type.name === 'table') count += 1;
+  });
+  return count;
+}
+
 function firstCellPos(doc: ReturnType<typeof schema.node>) {
   let pos: number | undefined;
   doc.descendants((node, nodePos) => {
@@ -367,6 +402,13 @@ function firstRowCellAttrs(doc: ReturnType<typeof schema.node>): Array<Record<st
 }
 
 describe('TableExtension column commands', () => {
+  test('deleteRow removes the table when deleting its only row', () => {
+    const doc = runTableCommand(makeFixedWidthTableDoc(), 'deleteRow');
+
+    expect(tableCount(doc)).toBe(0);
+    expect(topLevelBlockTypes(doc)).toEqual(['paragraph']);
+  });
+
   test('addColumnRight preserves fixed table width instead of inheriting stale colwidths', () => {
     const widths = firstRowColwidths(runTableCommand(makeFixedWidthTableDoc(), 'addColumnRight'));
 
@@ -393,6 +435,29 @@ describe('TableExtension column commands', () => {
     expect(attrs.width).toBe(5000);
     expect(attrs.widthType).toBe('pct');
     expect(attrs.columnWidths).toBeFalsy();
+  });
+
+  test('addColumnRight redistributes percentage cell widths across the full table width', () => {
+    const cells = firstRowCellAttrs(runTableCommand(makePercentWidthTableDoc(), 'addColumnRight'));
+
+    expect(cells.map((cell) => cell.widthType)).toEqual(['pct', 'pct', 'pct']);
+    expect(cells.map((cell) => cell.width)).toEqual([33, 33, 34]);
+  });
+
+  test('addColumnLeft redistributes percentage cell widths across the full table width', () => {
+    const cells = firstRowCellAttrs(runTableCommand(makePercentWidthTableDoc(), 'addColumnLeft'));
+
+    expect(cells.map((cell) => cell.widthType)).toEqual(['pct', 'pct', 'pct']);
+    expect(cells.map((cell) => cell.width)).toEqual([33, 33, 34]);
+  });
+
+  test('deleteColumn redistributes percentage cell widths across the full table width', () => {
+    const cells = firstRowCellAttrs(
+      runTableCommand(makeThreeColumnPercentWidthTableDoc(), 'deleteColumn')
+    );
+
+    expect(cells.map((cell) => cell.widthType)).toEqual(['pct', 'pct']);
+    expect(cells.map((cell) => cell.width)).toEqual([50, 50]);
   });
 
   test('addColumnRight clears stale tblGrid when preserving percentage table semantics', () => {

@@ -82,6 +82,53 @@ export interface InlineHeaderFooterEditorRef {
   redo(): boolean;
 }
 
+type TableCellPositionView = Pick<EditorView, 'posAtDOM' | 'state'>;
+
+export function getTableCellSelectionPositions(
+  view: TableCellPositionView,
+  cellElement: HTMLElement
+): number[] {
+  const candidates: number[] = [];
+  const addCandidate = (pos: number | null | undefined) => {
+    if (typeof pos === 'number' && Number.isFinite(pos) && !candidates.includes(pos)) {
+      candidates.push(pos);
+    }
+  };
+
+  const domPos = view.posAtDOM(cellElement, 0);
+  addCandidate(domPos);
+
+  try {
+    const $pos = view.state.doc.resolve(domPos);
+    for (let depth = $pos.depth; depth > 0; depth--) {
+      const node = $pos.node(depth);
+      if (node.type.name === 'tableCell' || node.type.name === 'tableHeader') {
+        addCandidate($pos.before(depth));
+        break;
+      }
+    }
+  } catch {
+    // The direct DOM position remains the best ProseMirror-native fallback.
+  }
+
+  return candidates;
+}
+
+export function createTableCellSelectionFromElement(
+  view: TableCellPositionView,
+  cellElement: HTMLElement
+): CellSelection | null {
+  const cellPositions = getTableCellSelectionPositions(view, cellElement);
+  for (const cellPos of cellPositions) {
+    try {
+      return CellSelection.create(view.state.doc, cellPos);
+    } catch {
+      // Try the next candidate; different DOM adapters map td offsets differently.
+    }
+  }
+  return null;
+}
+
 // ============================================================================
 // STYLES
 // ============================================================================
@@ -178,32 +225,12 @@ export const InlineHeaderFooterEditor = forwardRef<
     const view = viewRef.current;
     if (!view) return false;
 
-    let cellPos: number | null = null;
+    const selection = createTableCellSelectionFromElement(view, cellElement);
+    if (!selection) return false;
 
-    try {
-      const domPos = view.posAtDOM(cellElement, 0);
-      const $pos = view.state.doc.resolve(domPos);
-      for (let depth = $pos.depth; depth > 0; depth--) {
-        const node = $pos.node(depth);
-        if (node.type.name === 'tableCell' || node.type.name === 'tableHeader') {
-          cellPos = $pos.before(depth);
-          break;
-        }
-      }
-    } catch {
-      return false;
-    }
-
-    if (cellPos === null) return false;
-
-    try {
-      const selection = CellSelection.create(view.state.doc, cellPos, cellPos);
-      view.dispatch(view.state.tr.setSelection(selection));
-      view.focus();
-      return true;
-    } catch {
-      return false;
-    }
+    view.dispatch(view.state.tr.setSelection(selection));
+    view.focus();
+    return true;
   }, []);
 
   const handleContextMenu = useCallback(
@@ -412,7 +439,7 @@ export const InlineHeaderFooterEditor = forwardRef<
         e.stopPropagation();
       }}
       onContextMenu={handleContextMenu}
-      onDoubleClickCapture={handleDoubleClick}
+      onDoubleClick={handleDoubleClick}
     >
       {/* Separator bar — shown below for header, above for footer */}
       {position === 'footer' && (

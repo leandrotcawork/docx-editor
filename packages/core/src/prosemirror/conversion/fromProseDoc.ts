@@ -54,6 +54,10 @@ import type {
 import type { TextColorAttrs, UnderlineAttrs, FontFamilyAttrs } from '../schema/marks';
 import { pixelsToTwips } from '../../utils/units';
 
+// Allow 0.5px of twip slack so px<->twip conversion does not create
+// artificial table-grid changes during no-op round-trips.
+const WIDTH_ROUNDTRIP_TOLERANCE_TWIPS = 8;
+
 /**
  * Convert a ProseMirror document to our Document type
  */
@@ -233,6 +237,106 @@ function insertCommentRanges(content: ParagraphContent[], paragraph: PMNode): Pa
   return result;
 }
 
+function removeUndefinedProperties<T extends object>(value: T): T | undefined {
+  const entries = Object.entries(value).filter(([, entryValue]) => entryValue !== undefined);
+  return entries.length > 0 ? (Object.fromEntries(entries) as T) : undefined;
+}
+
+function formattingBaseline<T>(
+  originalValue: T | undefined,
+  resolvedValue: T | undefined,
+  preferResolved = false
+): T | undefined {
+  if (preferResolved) return resolvedValue;
+  return originalValue !== undefined ? originalValue : resolvedValue;
+}
+
+// Formatting attrs are JSON-shaped values from the DOCX model; compare them
+// structurally without depending on object key insertion order.
+function formattingValuesEqual<T>(left: T | undefined, right: T | undefined): boolean {
+  if (left === right) return true;
+  if (left == null || right == null) return false;
+  if (typeof left !== 'object' || typeof right !== 'object') return false;
+  if (Array.isArray(left) || Array.isArray(right)) {
+    if (!Array.isArray(left) || !Array.isArray(right) || left.length !== right.length) return false;
+    return left.every((item, index) => formattingValuesEqual(item, right[index]));
+  }
+
+  const leftRecord = left as Record<string, unknown>;
+  const rightRecord = right as Record<string, unknown>;
+  const leftKeys = Object.keys(leftRecord).filter((key) => leftRecord[key] !== undefined).sort();
+  const rightKeys = Object.keys(rightRecord).filter((key) => rightRecord[key] !== undefined).sort();
+  if (leftKeys.length !== rightKeys.length) return false;
+
+  return leftKeys.every(
+    (key, index) => key === rightKeys[index] && formattingValuesEqual(leftRecord[key], rightRecord[key])
+  );
+}
+
+function applyParagraphFormattingOverride<K extends keyof ParagraphFormatting>(
+  result: ParagraphFormatting,
+  key: K,
+  value: ParagraphFormatting[K] | null | undefined,
+  originalValue: ParagraphFormatting[K] | undefined,
+  resolvedValue: ParagraphFormatting[K] | undefined,
+  preferResolvedBaseline = false
+) {
+  const normalizedValue = value ?? undefined;
+  if (
+    formattingValuesEqual(
+      normalizedValue,
+      formattingBaseline(originalValue, resolvedValue, preferResolvedBaseline)
+    )
+  ) {
+    if (preferResolvedBaseline) {
+      delete result[key];
+    }
+    return;
+  }
+
+  result[key] = normalizedValue;
+}
+
+function buildTextFormattingOverride(
+  value: TextFormatting | null | undefined,
+  originalValue: TextFormatting | undefined,
+  resolvedValue: TextFormatting | undefined,
+  preferResolvedBaseline = false
+): TextFormatting | undefined {
+  const normalizedValue = value ?? undefined;
+  if (
+    formattingValuesEqual(
+      normalizedValue,
+      formattingBaseline(originalValue, resolvedValue, preferResolvedBaseline)
+    )
+  ) {
+    return preferResolvedBaseline ? undefined : originalValue;
+  }
+
+  const result: TextFormatting = preferResolvedBaseline ? {} : { ...(originalValue ?? {}) };
+  const keys = new Set<keyof TextFormatting>([
+    ...(Object.keys(normalizedValue ?? {}) as (keyof TextFormatting)[]),
+    ...(Object.keys(originalValue ?? {}) as (keyof TextFormatting)[]),
+    ...(Object.keys(resolvedValue ?? {}) as (keyof TextFormatting)[]),
+  ]);
+
+  for (const key of keys) {
+    const currentValue = normalizedValue?.[key];
+    const baselineValue = preferResolvedBaseline
+      ? resolvedValue?.[key]
+      : (resolvedValue?.[key] ?? originalValue?.[key]);
+    if (formattingValuesEqual(currentValue, baselineValue)) continue;
+
+    if (currentValue === undefined) {
+      delete result[key];
+    } else {
+      result[key] = currentValue as never;
+    }
+  }
+
+  return removeUndefinedProperties(result);
+}
+
 function paragraphAttrsToFormatting(attrs: ParagraphAttrs): ParagraphFormatting | undefined {
   // If we have the original inline formatting from the DOCX, use it as a base
   // for lossless round-trip. This preserves properties like contextualSpacing,
@@ -245,30 +349,136 @@ function paragraphAttrsToFormatting(attrs: ParagraphAttrs): ParagraphFormatting 
   // via editor commands (alignment, list toggle, etc.).
   if (attrs._originalFormatting) {
     const orig = attrs._originalFormatting;
+    const resolved = attrs._resolvedFormatting;
+    const currentStyleId = attrs.styleId ?? undefined;
+    const styleChanged = currentStyleId !== (orig.styleId ?? undefined);
     const result = { ...orig };
 
     // Override properties that user may have changed via editor commands.
     // Only override if the PM attr differs from the original value.
-    if (attrs.alignment !== (orig.alignment || undefined)) {
-      result.alignment = attrs.alignment || undefined;
-    }
-    if (attrs.numPr !== orig.numPr) {
-      // Use JSON comparison since these are objects
-      if (JSON.stringify(attrs.numPr) !== JSON.stringify(orig.numPr)) {
-        result.numPr = attrs.numPr || undefined;
+    applyParagraphFormattingOverride(
+      result,
+      'alignment',
+      attrs.alignment,
+      orig.alignment,
+      resolved?.alignment,
+      styleChanged
+    );
+    applyParagraphFormattingOverride(result, 'numPr', attrs.numPr, orig.numPr, resolved?.numPr, styleChanged);
+    applyParagraphFormattingOverride(result, 'styleId', attrs.styleId, orig.styleId, resolved?.styleId);
+    applyParagraphFormattingOverride(
+      result,
+      'pageBreakBefore',
+      attrs.pageBreakBefore,
+      orig.pageBreakBefore,
+      resolved?.pageBreakBefore,
+      styleChanged
+    );
+    applyParagraphFormattingOverride(result, 'bidi', attrs.bidi, orig.bidi, resolved?.bidi, styleChanged);
+    applyParagraphFormattingOverride(
+      result,
+      'spaceBefore',
+      attrs.spaceBefore,
+      orig.spaceBefore,
+      resolved?.spaceBefore,
+      styleChanged
+    );
+    applyParagraphFormattingOverride(
+      result,
+      'spaceAfter',
+      attrs.spaceAfter,
+      orig.spaceAfter,
+      resolved?.spaceAfter,
+      styleChanged
+    );
+    applyParagraphFormattingOverride(
+      result,
+      'lineSpacing',
+      attrs.lineSpacing,
+      orig.lineSpacing,
+      resolved?.lineSpacing,
+      styleChanged
+    );
+    applyParagraphFormattingOverride(
+      result,
+      'lineSpacingRule',
+      attrs.lineSpacingRule,
+      orig.lineSpacingRule,
+      resolved?.lineSpacingRule,
+      styleChanged
+    );
+    applyParagraphFormattingOverride(
+      result,
+      'indentLeft',
+      attrs.indentLeft,
+      orig.indentLeft,
+      resolved?.indentLeft,
+      styleChanged
+    );
+    applyParagraphFormattingOverride(
+      result,
+      'indentRight',
+      attrs.indentRight,
+      orig.indentRight,
+      resolved?.indentRight,
+      styleChanged
+    );
+    applyParagraphFormattingOverride(
+      result,
+      'indentFirstLine',
+      attrs.indentFirstLine,
+      orig.indentFirstLine,
+      resolved?.indentFirstLine,
+      styleChanged
+    );
+    const hangingIndentBaseline = formattingBaseline(
+      orig.hangingIndent,
+      resolved?.hangingIndent,
+      styleChanged
+    );
+    const normalizedHangingIndent =
+      attrs.hangingIndent === false && hangingIndentBaseline === undefined
+        ? undefined
+        : (attrs.hangingIndent ?? undefined);
+    if (formattingValuesEqual(normalizedHangingIndent, hangingIndentBaseline)) {
+      if (styleChanged) {
+        delete result.hangingIndent;
+      }
+    } else {
+      result.hangingIndent = normalizedHangingIndent;
+      if (normalizedHangingIndent === false && result.indentFirstLine === undefined) {
+        result.indentFirstLine = attrs.indentFirstLine ?? resolved?.indentFirstLine;
       }
     }
-    if (attrs.styleId !== (orig.styleId || undefined)) {
-      result.styleId = attrs.styleId || undefined;
-    }
-    if (attrs.pageBreakBefore !== (orig.pageBreakBefore || undefined)) {
-      result.pageBreakBefore = attrs.pageBreakBefore || undefined;
-    }
-    if (attrs.bidi !== (orig.bidi || undefined)) {
-      result.bidi = attrs.bidi || undefined;
-    }
+    applyParagraphFormattingOverride(result, 'borders', attrs.borders, orig.borders, resolved?.borders, styleChanged);
+    applyParagraphFormattingOverride(result, 'shading', attrs.shading, orig.shading, resolved?.shading, styleChanged);
+    applyParagraphFormattingOverride(result, 'tabs', attrs.tabs, orig.tabs, resolved?.tabs, styleChanged);
+    applyParagraphFormattingOverride(result, 'keepNext', attrs.keepNext, orig.keepNext, resolved?.keepNext, styleChanged);
+    applyParagraphFormattingOverride(result, 'keepLines', attrs.keepLines, orig.keepLines, resolved?.keepLines, styleChanged);
+    applyParagraphFormattingOverride(
+      result,
+      'contextualSpacing',
+      attrs.contextualSpacing,
+      orig.contextualSpacing,
+      resolved?.contextualSpacing,
+      styleChanged
+    );
+    applyParagraphFormattingOverride(
+      result,
+      'outlineLevel',
+      attrs.outlineLevel,
+      orig.outlineLevel,
+      resolved?.outlineLevel,
+      styleChanged
+    );
+    result.runProperties = buildTextFormattingOverride(
+      attrs.defaultTextFormatting,
+      orig.runProperties,
+      resolved?.runProperties,
+      styleChanged
+    );
 
-    return result;
+    return removeUndefinedProperties(result);
   }
 
   // Fallback: reconstruct formatting from individual attrs (e.g. for
@@ -287,6 +497,10 @@ function paragraphAttrsToFormatting(attrs: ParagraphAttrs): ParagraphFormatting 
     attrs.shading ||
     attrs.tabs ||
     attrs.outlineLevel != null ||
+    attrs.defaultTextFormatting ||
+    attrs.pageBreakBefore ||
+    attrs.keepNext ||
+    attrs.keepLines ||
     attrs.contextualSpacing ||
     attrs.bidi;
 
@@ -309,6 +523,10 @@ function paragraphAttrsToFormatting(attrs: ParagraphAttrs): ParagraphFormatting 
     borders: attrs.borders || undefined,
     shading: attrs.shading || undefined,
     tabs: attrs.tabs || undefined,
+    runProperties: attrs.defaultTextFormatting || undefined,
+    pageBreakBefore: attrs.pageBreakBefore || undefined,
+    keepNext: attrs.keepNext || undefined,
+    keepLines: attrs.keepLines || undefined,
     outlineLevel: attrs.outlineLevel ?? undefined,
     contextualSpacing: attrs.contextualSpacing || undefined,
     bidi: attrs.bidi || undefined,
@@ -1237,7 +1455,9 @@ function deriveColumnWidthsFromColwidths(
 function widthsAreEquivalent(actual: number[], expected: number[]): boolean {
   return (
     actual.length === expected.length &&
-    actual.every((width, index) => Math.abs(width - expected[index]) <= 8)
+    actual.every(
+      (width, index) => Math.abs(width - expected[index]) <= WIDTH_ROUNDTRIP_TOLERANCE_TWIPS
+    )
   );
 }
 
@@ -1675,7 +1895,10 @@ function tableCellWidthFromAttrs(attrs: TableCellAttrs): TableCellFormatting['wi
     attrs.colwidth.every((width) => typeof width === 'number' && Number.isFinite(width) && width > 0)
   ) {
     const colwidthValue = Math.round(pixelsToTwips(attrs.colwidth.reduce((sum, width) => sum + width, 0)));
-    if (attrs.width != null && Math.abs(colwidthValue - attrs.width) <= 8) {
+    if (
+      attrs.width != null &&
+      Math.abs(colwidthValue - attrs.width) <= WIDTH_ROUNDTRIP_TOLERANCE_TWIPS
+    ) {
       return {
         value: attrs.width,
         type: 'dxa',

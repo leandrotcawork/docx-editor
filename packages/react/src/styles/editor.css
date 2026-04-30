@@ -521,7 +521,7 @@
 }
 
 .hf-editor-pm .ProseMirror table {
-  border-collapse: separate !important;
+  border-collapse: collapse !important;
   border-spacing: 0 !important;
   table-layout: fixed !important;
   margin: 0;

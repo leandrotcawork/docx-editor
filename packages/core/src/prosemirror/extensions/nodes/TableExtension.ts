@@ -9,7 +9,6 @@ import type { NodeSpec, Node as PMNode } from 'prosemirror-model';
 import {
   Plugin,
   PluginKey,
-  TextSelection,
   type EditorState,
   type Transaction,
 } from 'prosemirror-state';
@@ -874,6 +873,50 @@ export const TablePluginExtension = createExtension({
       });
     }
 
+    function applyEqualPercentColumnGrid(
+      tr: Transaction,
+      tablePos: number,
+      table: PMNode,
+      columnCount: number
+    ): Transaction {
+      if (table.attrs.widthType !== 'pct') return tr;
+
+      const widthsPercent = distributeEvenly(100, columnCount);
+      let nextTr = tr;
+      let rowPos = tablePos + 1;
+
+      table.forEach((row) => {
+        if (row.type.name === 'tableRow') {
+          let columnIndex = 0;
+          let cellPos = rowPos + 1;
+          row.forEach((cell) => {
+            if (cell.type.name === 'tableCell' || cell.type.name === 'tableHeader') {
+              const colspan = (cell.attrs.colspan as number) || 1;
+              const cellWidth = widthsPercent
+                .slice(columnIndex, columnIndex + colspan)
+                .reduce((sum, width) => sum + width, 0);
+              nextTr = nextTr.setNodeMarkup(cellPos, undefined, {
+                ...cell.attrs,
+                width: cellWidth,
+                widthType: 'pct',
+                colwidth: null,
+              });
+              columnIndex += colspan;
+            }
+            cellPos += cell.nodeSize;
+          });
+        }
+        rowPos += row.nodeSize;
+      });
+
+      return nextTr.setNodeMarkup(tablePos, undefined, {
+        ...table.attrs,
+        width: table.attrs.width ?? 5000,
+        widthType: 'pct',
+        columnWidths: null,
+      });
+    }
+
     function clearNonFixedColumnGrid(tr: Transaction, tablePos: number, table: PMNode): Transaction {
       if (table.attrs.widthType === 'dxa' || !table.attrs.columnWidths) return tr;
 
@@ -1193,8 +1236,10 @@ export const TablePluginExtension = createExtension({
             tableStartPos += emptyParagraph.nodeSize;
           }
 
-          const firstCellContentPos = tableStartPos + 4;
-          tr.setSelection(TextSelection.create(tr.doc, firstCellContentPos));
+          const firstCellSelection = Selection.findFrom(tr.doc.resolve(tableStartPos + 1), 1);
+          if (firstCellSelection) {
+            tr.setSelection(firstCellSelection);
+          }
           dispatch(tr.scrollIntoView());
         }
 
@@ -1284,13 +1329,18 @@ export const TablePluginExtension = createExtension({
         !context.isInTable ||
         context.rowIndex === undefined ||
         !context.table ||
-        context.tablePos === undefined ||
-        (context.rowCount || 0) <= 1
+        context.tablePos === undefined
       )
         return false;
 
       if (dispatch) {
         const tr = state.tr;
+        if ((context.rowCount || 0) <= 1) {
+          tr.delete(context.tablePos, context.tablePos + context.table.nodeSize);
+          dispatch(tr.scrollIntoView());
+          return true;
+        }
+
         let rowStart = context.tablePos + 1;
         for (let i = 0; i < context.rowIndex; i++) {
           rowStart += context.table.child(i).nodeSize;
@@ -1365,7 +1415,10 @@ export const TablePluginExtension = createExtension({
         const updatedTable = tr.doc.nodeAt(context.tablePos);
         if (updatedTable && updatedTable.type.name === 'table') {
           const colCount = getLogicalColumnCount(updatedTable) || newColumnCount;
-          tr = applyEqualFixedColumnGrid(tr, context.tablePos, updatedTable, colCount);
+          tr =
+            updatedTable.attrs.widthType === 'pct'
+              ? applyEqualPercentColumnGrid(tr, context.tablePos, updatedTable, colCount)
+              : applyEqualFixedColumnGrid(tr, context.tablePos, updatedTable, colCount);
           const normalizedTable = tr.doc.nodeAt(context.tablePos);
           if (normalizedTable && normalizedTable.type.name === 'table') {
             tr = clearNonFixedColumnGrid(tr, context.tablePos, normalizedTable);
@@ -1441,7 +1494,10 @@ export const TablePluginExtension = createExtension({
         const updatedTable = tr.doc.nodeAt(context.tablePos);
         if (updatedTable && updatedTable.type.name === 'table') {
           const colCount = getLogicalColumnCount(updatedTable) || newColumnCount;
-          tr = applyEqualFixedColumnGrid(tr, context.tablePos, updatedTable, colCount);
+          tr =
+            updatedTable.attrs.widthType === 'pct'
+              ? applyEqualPercentColumnGrid(tr, context.tablePos, updatedTable, colCount)
+              : applyEqualFixedColumnGrid(tr, context.tablePos, updatedTable, colCount);
           const normalizedTable = tr.doc.nodeAt(context.tablePos);
           if (normalizedTable && normalizedTable.type.name === 'table') {
             tr = clearNonFixedColumnGrid(tr, context.tablePos, normalizedTable);
@@ -1499,7 +1555,10 @@ export const TablePluginExtension = createExtension({
         const updatedTable = tr.doc.nodeAt(context.tablePos);
         if (updatedTable && updatedTable.type.name === 'table') {
           const colCount = getLogicalColumnCount(updatedTable) || newColumnCount;
-          tr = applyEqualFixedColumnGrid(tr, context.tablePos, updatedTable, colCount);
+          tr =
+            updatedTable.attrs.widthType === 'pct'
+              ? applyEqualPercentColumnGrid(tr, context.tablePos, updatedTable, colCount)
+              : applyEqualFixedColumnGrid(tr, context.tablePos, updatedTable, colCount);
           const normalizedTable = tr.doc.nodeAt(context.tablePos);
           if (normalizedTable && normalizedTable.type.name === 'table') {
             tr = clearNonFixedColumnGrid(tr, context.tablePos, normalizedTable);

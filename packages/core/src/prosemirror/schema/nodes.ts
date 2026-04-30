@@ -114,6 +114,8 @@ export interface ParagraphAttrs {
   /** Original inline paragraph formatting from DOCX (pre-style-resolution).
    *  Used by fromProseDoc for lossless round-trip serialization. */
   _originalFormatting?: ParagraphFormatting;
+  /** Style-resolved paragraph formatting used as editor render baseline. */
+  _resolvedFormatting?: ParagraphFormatting;
 
   /** Full section properties for paragraphs that end a section.
    *  Used by layout engine for per-section column/page config and round-trip. */

@@ -6,9 +6,13 @@
  */
 
 import { describe, test, expect } from 'bun:test';
+import { EditorState, TextSelection } from 'prosemirror-state';
 import { headerFooterToProseDoc, toProseDoc } from './toProseDoc';
-import { fromProseDoc } from './fromProseDoc';
-import type { Document, Table, TableRow, TableCell, Theme } from '../../types/document';
+import { fromProseDoc, proseDocToBlocks } from './fromProseDoc';
+import { ParagraphExtension } from '../extensions/core/ParagraphExtension';
+import type { Document, Table, TableRow, TableCell, Theme, StyleDefinitions } from '../../types/document';
+
+type JsonNode = { type?: string; attrs?: Record<string, unknown>; content?: JsonNode[] };
 
 const OFFICE_THEME: Theme = {
   colorScheme: {
@@ -75,6 +79,174 @@ function collectTableCellLikeAttrs(pmDoc: ReturnType<typeof toProseDoc>): Array<
   return cells;
 }
 
+describe('paragraph style round-trip', () => {
+  test('applying a paragraph style does not serialize style-resolved spacing as direct formatting', () => {
+    const styles: StyleDefinitions = {
+      styles: [
+        {
+          styleId: 'Normal',
+          type: 'paragraph',
+          default: true,
+          pPr: { spaceAfter: 160 },
+        },
+        {
+          styleId: 'Heading1',
+          type: 'paragraph',
+          pPr: { spaceBefore: 480, spaceAfter: 240 },
+          rPr: { bold: true, fontSize: 32 },
+        },
+      ],
+    };
+    const doc: Document = {
+      package: {
+        document: {
+          content: [
+            {
+              type: 'paragraph',
+              formatting: { styleId: 'Normal' },
+              content: [{ type: 'run', content: [{ type: 'text', text: 'Title' }] }],
+            },
+          ],
+        },
+      },
+    };
+    const pmDoc = toProseDoc(doc, { styles });
+    const state = EditorState.create({
+      doc: pmDoc,
+      selection: TextSelection.create(pmDoc, 1, pmDoc.content.size - 1),
+    });
+    const commands = ParagraphExtension().onSchemaReady({ schema: pmDoc.type.schema }).commands;
+    let nextState = state;
+
+    const applied = commands?.applyStyle('Heading1', {
+      paragraphFormatting: { spaceBefore: 480, spaceAfter: 240 },
+      runFormatting: { bold: true, fontSize: 32 },
+    })(state, (tr) => {
+      nextState = state.apply(tr);
+    });
+
+    expect(applied).toBe(true);
+    const roundTripped = fromProseDoc(nextState.doc);
+    const paragraph = roundTripped.package.document.content[0];
+
+    expect(paragraph?.type).toBe('paragraph');
+    if (paragraph?.type !== 'paragraph') {
+      throw new Error('Expected first block to remain a paragraph');
+    }
+    expect(paragraph.formatting).toEqual({ styleId: 'Heading1' });
+  });
+
+  test('applying a paragraph style clears previous direct spacing instead of replacing it with style spacing', () => {
+    const styles: StyleDefinitions = {
+      styles: [
+        {
+          styleId: 'Normal',
+          type: 'paragraph',
+          default: true,
+          pPr: { spaceAfter: 160 },
+        },
+        {
+          styleId: 'Heading1',
+          type: 'paragraph',
+          pPr: { spaceBefore: 480, spaceAfter: 240 },
+        },
+      ],
+    };
+    const doc: Document = {
+      package: {
+        document: {
+          content: [
+            {
+              type: 'paragraph',
+              formatting: { styleId: 'Normal', spaceAfter: 80 },
+              content: [{ type: 'run', content: [{ type: 'text', text: 'Title' }] }],
+            },
+          ],
+        },
+      },
+    };
+    const pmDoc = toProseDoc(doc, { styles });
+    const state = EditorState.create({
+      doc: pmDoc,
+      selection: TextSelection.create(pmDoc, 1, pmDoc.content.size - 1),
+    });
+    const commands = ParagraphExtension().onSchemaReady({ schema: pmDoc.type.schema }).commands;
+    let nextState = state;
+
+    const applied = commands?.applyStyle('Heading1', {
+      paragraphFormatting: { spaceBefore: 480, spaceAfter: 240 },
+    })(state, (tr) => {
+      nextState = state.apply(tr);
+    });
+
+    expect(applied).toBe(true);
+    const roundTripped = fromProseDoc(nextState.doc);
+    const paragraph = roundTripped.package.document.content[0];
+
+    expect(paragraph?.type).toBe('paragraph');
+    if (paragraph?.type !== 'paragraph') {
+      throw new Error('Expected first block to remain a paragraph');
+    }
+    expect(paragraph.formatting).toEqual({ styleId: 'Heading1' });
+  });
+
+  test('applying a paragraph style does not serialize inherited run properties as direct formatting', () => {
+    const styles: StyleDefinitions = {
+      docDefaults: {
+        rPr: { fontSize: 22 },
+      },
+      styles: [
+        {
+          styleId: 'Normal',
+          type: 'paragraph',
+          default: true,
+        },
+        {
+          styleId: 'Heading1',
+          type: 'paragraph',
+          pPr: { spaceBefore: 480 },
+        },
+      ],
+    };
+    const doc: Document = {
+      package: {
+        document: {
+          content: [
+            {
+              type: 'paragraph',
+              formatting: { styleId: 'Normal', runProperties: { italic: true } },
+              content: [{ type: 'run', content: [{ type: 'text', text: 'Title' }] }],
+            },
+          ],
+        },
+      },
+    };
+    const pmDoc = toProseDoc(doc, { styles });
+    const state = EditorState.create({
+      doc: pmDoc,
+      selection: TextSelection.create(pmDoc, 1, pmDoc.content.size - 1),
+    });
+    const commands = ParagraphExtension().onSchemaReady({ schema: pmDoc.type.schema }).commands;
+    let nextState = state;
+
+    const applied = commands?.applyStyle('Heading1', {
+      paragraphFormatting: { spaceBefore: 480 },
+      runFormatting: { fontSize: 22 },
+    })(state, (tr) => {
+      nextState = state.apply(tr);
+    });
+
+    expect(applied).toBe(true);
+    const roundTripped = fromProseDoc(nextState.doc);
+    const paragraph = roundTripped.package.document.content[0];
+
+    expect(paragraph?.type).toBe('paragraph');
+    if (paragraph?.type !== 'paragraph') {
+      throw new Error('Expected first block to remain a paragraph');
+    }
+    expect(paragraph.formatting).toEqual({ styleId: 'Heading1' });
+  });
+});
 
 describe('headerFooterToProseDoc - table sizing metadata', () => {
   test('dxa cell widths initialize prosemirror-tables colwidth metadata', () => {
@@ -128,6 +300,288 @@ describe('headerFooterToProseDoc - table sizing metadata', () => {
     expect(cells[0].colwidth).toEqual([280]);
     expect(cells[1].widthType).toBe('pct');
     expect(cells[1].colwidth).toEqual([322]);
+  });
+
+  test('does not materialize inherited paragraph spacing during header table round-trip', () => {
+    const table: Table = {
+      type: 'table',
+      columnWidths: [4252, 4252],
+      formatting: {
+        width: { value: 8504, type: 'dxa' },
+      },
+      rows: [
+        {
+          type: 'tableRow',
+          cells: [
+            {
+              type: 'tableCell',
+              content: [
+                { type: 'paragraph', formatting: { alignment: 'left' }, content: [] },
+                { type: 'paragraph', content: [] },
+              ],
+            },
+            makeCell(),
+          ],
+        },
+      ],
+    };
+    const pmDoc = headerFooterToProseDoc([table], {
+      styles: {
+        docDefaults: {
+          pPr: { spaceAfter: 160, lineSpacing: 259, lineSpacingRule: 'auto' },
+        },
+        styles: [],
+      },
+    });
+
+    const [roundTrippedTable] = proseDocToBlocks(pmDoc) as Table[];
+    const secondParagraph = roundTrippedTable.rows[0]?.cells[0]?.content[1];
+
+    expect(secondParagraph?.type).toBe('paragraph');
+    expect(secondParagraph?.formatting).toBeUndefined();
+  });
+
+  test('treats reordered resolved formatting objects as unchanged', () => {
+    const table: Table = {
+      type: 'table',
+      columnWidths: [4252, 4252],
+      formatting: {
+        width: { value: 8504, type: 'dxa' },
+      },
+      rows: [
+        {
+          type: 'tableRow',
+          cells: [
+            {
+              type: 'tableCell',
+              content: [{ type: 'paragraph', content: [] }],
+            },
+            makeCell(),
+          ],
+        },
+      ],
+    };
+    const pmDoc = headerFooterToProseDoc([table], {
+      styles: {
+        docDefaults: {
+          pPr: {
+            borders: {
+              bottom: { color: { rgb: '7F1D1D' }, size: 8, style: 'single' },
+            },
+          },
+        },
+        styles: [],
+      },
+    });
+    const json = pmDoc.toJSON() as JsonNode;
+    const reorderBorderAttrs = (node: JsonNode) => {
+      if (node.type === 'paragraph' && node.attrs) {
+        node.attrs.borders = {
+          bottom: { style: 'single', size: 8, color: { rgb: '7F1D1D' } },
+        };
+      }
+      node.content?.forEach(reorderBorderAttrs);
+    };
+    reorderBorderAttrs(json);
+
+    const [roundTrippedTable] = proseDocToBlocks(pmDoc.type.schema.nodeFromJSON(json)) as Table[];
+    const paragraph = roundTrippedTable.rows[0]?.cells[0]?.content[0];
+
+    expect(paragraph?.type).toBe('paragraph');
+    expect(paragraph?.formatting).toBeUndefined();
+  });
+
+  test('does not materialize inherited runProperties during no-op header table round-trip', () => {
+    const table: Table = {
+      type: 'table',
+      columnWidths: [4252, 4252],
+      formatting: {
+        width: { value: 8504, type: 'dxa' },
+      },
+      rows: [
+        {
+          type: 'tableRow',
+          cells: [
+            {
+              type: 'tableCell',
+              content: [
+                {
+                  type: 'paragraph',
+                  formatting: { runProperties: { bold: true } },
+                  content: [],
+                },
+              ],
+            },
+            makeCell(),
+          ],
+        },
+      ],
+    };
+    const pmDoc = headerFooterToProseDoc([table], {
+      styles: {
+        docDefaults: {
+          rPr: {
+            fontSize: 22,
+            fontFamily: { ascii: 'Calibri', hAnsi: 'Calibri' },
+          },
+        },
+        styles: [],
+      },
+    });
+
+    const [roundTrippedTable] = proseDocToBlocks(pmDoc) as Table[];
+    const paragraph = roundTrippedTable.rows[0]?.cells[0]?.content[0];
+
+    expect(paragraph?.type).toBe('paragraph');
+    if (paragraph?.type !== 'paragraph') {
+      throw new Error('Expected a paragraph in the first header table cell');
+    }
+    expect(paragraph.formatting?.runProperties).toEqual({ bold: true });
+  });
+
+  test('preserves user-applied spacing on originally unformatted header table paragraphs', () => {
+    const table: Table = {
+      type: 'table',
+      columnWidths: [4252, 4252],
+      formatting: {
+        width: { value: 8504, type: 'dxa' },
+      },
+      rows: [
+        {
+          type: 'tableRow',
+          cells: [
+            {
+              type: 'tableCell',
+              content: [{ type: 'paragraph', content: [] }],
+            },
+            makeCell(),
+          ],
+        },
+      ],
+    };
+    const pmDoc = headerFooterToProseDoc([table], {
+      styles: {
+        docDefaults: {
+          pPr: { spaceAfter: 160, lineSpacing: 259, lineSpacingRule: 'auto' },
+        },
+        styles: [],
+      },
+    });
+    const json = pmDoc.toJSON() as JsonNode;
+    const applySpacingEdit = (node: JsonNode) => {
+      if (node.type === 'paragraph' && node.attrs) {
+        node.attrs.spaceAfter = 240;
+      }
+      node.content?.forEach(applySpacingEdit);
+    };
+    applySpacingEdit(json);
+
+    const [roundTrippedTable] = proseDocToBlocks(pmDoc.type.schema.nodeFromJSON(json)) as Table[];
+    const paragraph = roundTrippedTable.rows[0]?.cells[0]?.content[0];
+
+    expect(paragraph?.type).toBe('paragraph');
+    if (paragraph?.type !== 'paragraph') {
+      throw new Error('Expected a paragraph in the first header table cell');
+    }
+    expect(paragraph.formatting?.spaceAfter).toBe(240);
+  });
+
+  test('preserves user-applied paragraph borders on originally unformatted header table paragraphs', () => {
+    const table: Table = {
+      type: 'table',
+      columnWidths: [4252, 4252],
+      formatting: {
+        width: { value: 8504, type: 'dxa' },
+      },
+      rows: [
+        {
+          type: 'tableRow',
+          cells: [
+            {
+              type: 'tableCell',
+              content: [{ type: 'paragraph', content: [] }],
+            },
+            makeCell(),
+          ],
+        },
+      ],
+    };
+    const pmDoc = headerFooterToProseDoc([table], {
+      styles: {
+        docDefaults: {
+          pPr: { spaceAfter: 160 },
+        },
+        styles: [],
+      },
+    });
+    const json = pmDoc.toJSON() as JsonNode;
+    const applyBorderEdit = (node: JsonNode) => {
+      if (node.type === 'paragraph' && node.attrs) {
+        node.attrs.borders = {
+          bottom: { style: 'single', size: 8, color: { rgb: '7F1D1D' } },
+        };
+      }
+      node.content?.forEach(applyBorderEdit);
+    };
+    applyBorderEdit(json);
+
+    const [roundTrippedTable] = proseDocToBlocks(pmDoc.type.schema.nodeFromJSON(json)) as Table[];
+    const paragraph = roundTrippedTable.rows[0]?.cells[0]?.content[0];
+
+    expect(paragraph?.type).toBe('paragraph');
+    if (paragraph?.type !== 'paragraph') {
+      throw new Error('Expected a paragraph in the first header table cell');
+    }
+    expect(paragraph.formatting?.borders?.bottom?.style).toBe('single');
+    expect(paragraph.formatting?.spaceAfter).toBeUndefined();
+  });
+
+  test('preserves clearing inherited hanging indent on originally unformatted header paragraphs', () => {
+    const table: Table = {
+      type: 'table',
+      columnWidths: [4252, 4252],
+      formatting: {
+        width: { value: 8504, type: 'dxa' },
+      },
+      rows: [
+        {
+          type: 'tableRow',
+          cells: [
+            {
+              type: 'tableCell',
+              content: [{ type: 'paragraph', content: [] }],
+            },
+            makeCell(),
+          ],
+        },
+      ],
+    };
+    const pmDoc = headerFooterToProseDoc([table], {
+      styles: {
+        docDefaults: {
+          pPr: { indentFirstLine: 360, hangingIndent: true },
+        },
+        styles: [],
+      },
+    });
+    const json = pmDoc.toJSON() as JsonNode;
+    const clearHangingIndent = (node: JsonNode) => {
+      if (node.type === 'paragraph' && node.attrs) {
+        node.attrs.hangingIndent = false;
+      }
+      node.content?.forEach(clearHangingIndent);
+    };
+    clearHangingIndent(json);
+
+    const [roundTrippedTable] = proseDocToBlocks(pmDoc.type.schema.nodeFromJSON(json)) as Table[];
+    const paragraph = roundTrippedTable.rows[0]?.cells[0]?.content[0];
+
+    expect(paragraph?.type).toBe('paragraph');
+    if (paragraph?.type !== 'paragraph') {
+      throw new Error('Expected a paragraph in the first header table cell');
+    }
+    expect(paragraph.formatting?.indentFirstLine).toBe(360);
+    expect(paragraph.formatting?.hangingIndent).toBe(false);
   });
 });
 describe('toProseDoc — table cell theme color resolution', () => {
@@ -243,7 +697,6 @@ describe('toProseDoc ↔ fromProseDoc round-trip — theme shading preservation'
     const pmDoc = toProseDoc(inDoc);
 
     // Simulate the user picking a new color: swap backgroundColor on every cell.
-    type JsonNode = { type?: string; attrs?: Record<string, unknown>; content?: JsonNode[] };
     const json = pmDoc.toJSON() as JsonNode;
     const setBg = (n: JsonNode) => {
       if (n.type === 'tableCell' && n.attrs) n.attrs.backgroundColor = 'FF00FF';
@@ -262,8 +715,6 @@ describe('toProseDoc ↔ fromProseDoc round-trip — table sizing metadata', () 
   function firstTable(doc: Document): Table {
     return doc.package.document.content[0] as Table;
   }
-
-  type JsonNode = { type?: string; attrs?: Record<string, unknown>; content?: JsonNode[] };
 
   function resizeFirstRowColwidths(pmDoc: ReturnType<typeof toProseDoc>, colwidths: number[]) {
     const json = pmDoc.toJSON() as JsonNode;

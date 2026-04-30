@@ -18,6 +18,7 @@ import type { ParagraphAttrs } from '../schema/nodes';
 import type {
   Document,
   Paragraph,
+  ParagraphFormatting,
   Run,
   TextFormatting,
   RunContent,
@@ -287,8 +288,9 @@ function paragraphFormattingToAttrs(
     listMarkerFontFamily: paragraph.listRendering?.markerFontFamily || undefined,
     listMarkerFontSize: paragraph.listRendering?.markerFontSize || undefined,
     listLevelNumFmts: paragraph.listRendering?.levelNumFmts || undefined,
-    // Store original inline formatting for lossless serialization round-trip
-    _originalFormatting: formatting || undefined,
+    // Always provide a formatting baseline, even when the source paragraph had
+    // no direct formatting, so later user edits use the same delta path.
+    _originalFormatting: formatting ?? {},
   };
 
   // If we have a style resolver, resolve the style and get base properties
@@ -371,7 +373,41 @@ function paragraphFormattingToAttrs(
     }
   }
 
+  attrs._resolvedFormatting = attrsToResolvedParagraphFormatting(attrs);
+
   return attrs;
+}
+
+function attrsToResolvedParagraphFormatting(attrs: ParagraphAttrs): ParagraphFormatting | undefined {
+  const formatting: ParagraphFormatting = {
+    alignment: attrs.alignment,
+    spaceBefore: attrs.spaceBefore,
+    spaceAfter: attrs.spaceAfter,
+    lineSpacing: attrs.lineSpacing,
+    lineSpacingRule: attrs.lineSpacingRule,
+    indentLeft: attrs.indentLeft,
+    indentRight: attrs.indentRight,
+    indentFirstLine: attrs.indentFirstLine,
+    hangingIndent: attrs.hangingIndent,
+    numPr: attrs.numPr,
+    styleId: attrs.styleId,
+    borders: attrs.borders,
+    shading: attrs.shading,
+    tabs: attrs.tabs,
+    runProperties: attrs.defaultTextFormatting,
+    pageBreakBefore: attrs.pageBreakBefore,
+    keepNext: attrs.keepNext,
+    keepLines: attrs.keepLines,
+    contextualSpacing: attrs.contextualSpacing,
+    bidi: attrs.bidi,
+    outlineLevel: attrs.outlineLevel,
+  };
+  return removeUndefinedProperties(formatting);
+}
+
+function removeUndefinedProperties<T extends object>(value: T): T | undefined {
+  const entries = Object.entries(value).filter(([, entryValue]) => entryValue !== undefined);
+  return entries.length > 0 ? (Object.fromEntries(entries) as T) : undefined;
 }
 
 // ============================================================================
