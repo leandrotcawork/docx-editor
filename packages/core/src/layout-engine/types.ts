@@ -630,6 +630,8 @@ export type TableFragment = FragmentBase & {
   continuesOnNext?: boolean;
   /** Number of header rows prepended to this continuation fragment (0 or undefined for first fragment). */
   headerRowCount?: number;
+  /** Extra height needed when a continuation fragment redraws the first content row's top border. */
+  startBorderHeight?: number;
 };
 
 /**

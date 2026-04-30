@@ -28,6 +28,7 @@ import {
   type TabStop as TabCalcStop,
 } from '../prosemirror/utils/tabCalculator';
 import { resolveFontFamily } from '../utils/fontResolver';
+import { hasParagraphBorder, paragraphBorderPadding } from '../layout-engine/borders';
 
 /**
  * CSS class names for paragraph rendering
@@ -1007,14 +1008,20 @@ export function renderParagraphFragment(
     // The space attribute specifies the distance between text and border in points,
     // converted to pixels during layout bridge conversion.
     // Fallback to sensible defaults when space is not specified.
-    const hasBorder =
-      borders.top || borders.bottom || borders.left || borders.right || borders.between;
-    if (hasBorder) {
+    if (hasParagraphBorder(borders)) {
       const topBorder = borders.top || borders.between;
-      fragmentEl.style.paddingLeft = borders.left ? `${borders.left.space ?? 4}px` : '0';
-      fragmentEl.style.paddingRight = borders.right ? `${borders.right.space ?? 4}px` : '0';
-      fragmentEl.style.paddingTop = topBorder ? `${topBorder.space ?? 2}px` : '0';
-      fragmentEl.style.paddingBottom = borders.bottom ? `${borders.bottom.space ?? 6}px` : '0';
+      fragmentEl.style.paddingLeft = borders.left
+        ? `${paragraphBorderPadding(borders.left, 4)}px`
+        : '0';
+      fragmentEl.style.paddingRight = borders.right
+        ? `${paragraphBorderPadding(borders.right, 4)}px`
+        : '0';
+      fragmentEl.style.paddingTop = topBorder
+        ? `${paragraphBorderPadding(topBorder, 2)}px`
+        : '0';
+      fragmentEl.style.paddingBottom = borders.bottom
+        ? `${paragraphBorderPadding(borders.bottom, 6)}px`
+        : '0';
     }
   }
 

@@ -27,6 +27,7 @@ import type {
 } from './types';
 
 import { createPaginator } from './paginator';
+import { paragraphBorderExtent, tableRowTopBorderHeight } from './borders';
 import {
   computeKeepNextChains,
   calculateChainHeight,
@@ -70,11 +71,6 @@ function nextBlockForcesBreak(blocks: FlowBlock[], index: number): boolean {
   return hasPageBreakBefore(next);
 }
 
-function borderExtent(border: { space?: number; width?: number } | undefined): number {
-  if (!border) return 0;
-  return (border.space ?? 0) + (border.width ?? 0);
-}
-
 function paragraphBorderHeight(
   block: ParagraphBlock,
   isFirstFragment: boolean,
@@ -82,7 +78,10 @@ function paragraphBorderHeight(
 ): number {
   const borders = block.attrs?.borders;
   if (!borders) return 0;
-  return (isFirstFragment ? borderExtent(borders.top) : 0) + (isLastFragment ? borderExtent(borders.bottom) : 0);
+  return (
+    (isFirstFragment ? paragraphBorderExtent(borders.top, 2) : 0) +
+    (isLastFragment ? paragraphBorderExtent(borders.bottom, 6) : 0)
+  );
 }
 
 /**
@@ -505,6 +504,10 @@ function layoutTable(
 
     // For continuation fragments, we need space for header rows + at least one content row
     const headerOverhead = !isFirstFragment && headerRowCount > 0 ? headerRowsHeight : 0;
+    const startBorderHeight =
+      !isFirstFragment && headerRowCount === 0
+        ? tableRowTopBorderHeight(block.rows[currentRowIndex]?.cells)
+        : 0;
 
     // Calculate how many rows fit (excluding header rows which are prepended separately)
     let rowsHeight = 0;
@@ -512,7 +515,7 @@ function layoutTable(
 
     for (let j = currentRowIndex; j < rows.length; j++) {
       const rowHeight = rows[j].height;
-      const totalWithRow = rowsHeight + rowHeight + headerOverhead;
+      const totalWithRow = rowsHeight + rowHeight + headerOverhead + startBorderHeight;
 
       if (totalWithRow <= availableHeight || fittingRows === 0) {
         rowsHeight += rowHeight;
@@ -539,7 +542,7 @@ function layoutTable(
     }
 
     // Total fragment height includes header rows for continuation fragments
-    const fragmentHeight = rowsHeight + headerOverhead;
+    const fragmentHeight = rowsHeight + headerOverhead + startBorderHeight;
 
     // Create fragment for these rows
     const isLastFragment = currentRowIndex + fittingRows >= rows.length;
@@ -568,6 +571,7 @@ function layoutTable(
       continuesFromPrev: !isFirstFragment,
       continuesOnNext: !isLastFragment,
       headerRowCount: !isFirstFragment && headerRowCount > 0 ? headerRowCount : undefined,
+      startBorderHeight: startBorderHeight || undefined,
     };
 
     const result = paginator.addFragment(fragment, fragmentHeight, 0, 0);
@@ -580,7 +584,10 @@ function layoutTable(
     if (currentRowIndex < rows.length) {
       // Need space for at least one content row plus repeated header rows
       const nextRowHeight =
-        rows[currentRowIndex].height + (headerRowCount > 0 ? headerRowsHeight : 0);
+        rows[currentRowIndex].height +
+        (headerRowCount > 0
+          ? headerRowsHeight
+          : tableRowTopBorderHeight(block.rows[currentRowIndex]?.cells));
       paginator.ensureFits(nextRowHeight);
     }
   }

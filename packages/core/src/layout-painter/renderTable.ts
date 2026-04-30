@@ -805,10 +805,14 @@ export function renderTableFragment(
       headerRowCount > 0 && fragment.continuesFromPrev
         ? false // header rows already drawn, content rows are not "first"
         : fragment.continuesFromPrev && rowIndex === fragment.fromRow;
+    const rowMeasureForFragment =
+      isFirstRowInFragment && fragment.startBorderHeight
+        ? { ...rowMeasure, height: rowMeasure.height + fragment.startBorderHeight }
+        : rowMeasure;
 
     const rowEl = renderTableRow(
       row,
-      rowMeasure,
+      rowMeasureForFragment,
       rowIndex,
       y,
       measure.columnWidths,
@@ -821,7 +825,7 @@ export function renderTableFragment(
     );
 
     tableEl.appendChild(rowEl);
-    y += rowMeasure.height;
+    y += rowMeasureForFragment.height;
   }
 
   // Add row resize handles at each row boundary (between consecutive rows)

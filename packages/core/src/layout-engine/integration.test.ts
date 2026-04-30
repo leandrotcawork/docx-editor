@@ -18,6 +18,8 @@ import type {
   Measure,
   PageMargins,
   LayoutOptions,
+  TableBlock,
+  TableMeasure,
 } from './types';
 
 import { hitTestPage, hitTestFragment, getPageTop } from '../layout-bridge/hitTest';
@@ -1081,5 +1083,69 @@ describe('Layout Engine - Contextual Spacing', () => {
     // gap = max(spaceAfter=10, spaceBefore=5) = 10
     const gap = frags[1].y - (frags[0].y + frags[0].height);
     expect(gap).toBe(10);
+  });
+});
+
+describe('Layout Engine - body layout border fidelity', () => {
+  test('uses renderer-equivalent fallback padding for paragraph border height', () => {
+    const block: ParagraphBlock = {
+      ...makeParagraphBlock(0, 'Bordered', 1),
+      attrs: {
+        borders: {
+          bottom: { width: 1, style: 'solid', color: '#8b1e2d' },
+        },
+      },
+    };
+    const measure = makeParagraphMeasure([makeLine(0, 0, 0, 8, 80, 20)]);
+
+    const layout = layoutDocument([block], [measure], makeLayoutOptions());
+
+    const fragment = layout.pages[0].fragments[0];
+    expect(fragment.kind).toBe('paragraph');
+    // Renderer fallback is 6px bottom padding plus 1px border.
+    expect(fragment.height).toBe(27);
+  });
+
+  test('includes top border redrawn on split table continuation fragments', () => {
+    const borderedCell = {
+      id: 'cell',
+      blocks: [],
+      borders: {
+        top: { width: 2, style: 'solid', color: '#000000' },
+        bottom: { width: 1, style: 'solid', color: '#000000' },
+      },
+    };
+    const block: TableBlock = {
+      kind: 'table',
+      id: 'table',
+      rows: [
+        { id: 'row-0', cells: [{ ...borderedCell, id: 'cell-0' }] },
+        { id: 'row-1', cells: [{ ...borderedCell, id: 'cell-1' }] },
+      ],
+    };
+    const measure: TableMeasure = {
+      kind: 'table',
+      columnWidths: [200],
+      totalWidth: 200,
+      totalHeight: 140,
+      rows: [
+        { height: 70, cells: [{ width: 200, height: 70, blocks: [] }] },
+        { height: 70, cells: [{ width: 200, height: 70, blocks: [] }] },
+      ],
+    };
+
+    const layout = layoutDocument(
+      [block],
+      [measure],
+      makeLayoutOptions({
+        pageSize: { w: 300, h: 100 },
+        margins: { top: 0, right: 0, bottom: 0, left: 0 },
+      })
+    );
+
+    expect(layout.pages.length).toBe(2);
+    const continuation = layout.pages[1].fragments[0];
+    expect(continuation.kind).toBe('table');
+    expect(continuation.height).toBe(72);
   });
 });
