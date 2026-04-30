@@ -753,12 +753,19 @@ export function renderTableFragment(
     tableEl.appendChild(handle);
   }
 
-  // Build row Y positions for rowSpan height calculation
+  // Build row Y positions for rowSpan height calculation. Continuation
+  // fragments without repeated headers redraw the first content row's top
+  // border, so every consumer of row height must include that fragment-local
+  // extra height.
+  const rowHeightInFragment = (rowIndex: number): number => {
+    const baseHeight = measure.rows[rowIndex]?.height ?? 0;
+    return rowIndex === fragment.fromRow ? baseHeight + (fragment.startBorderHeight ?? 0) : baseHeight;
+  };
   const rowYPositions: number[] = [];
   let yPos = 0;
   for (let i = 0; i < measure.rows.length; i++) {
     rowYPositions.push(yPos);
-    yPos += measure.rows[i]?.height ?? 0;
+    yPos += rowHeightInFragment(i);
   }
   rowYPositions.push(yPos); // Add final position for height calculation
 
@@ -807,7 +814,7 @@ export function renderTableFragment(
         : fragment.continuesFromPrev && rowIndex === fragment.fromRow;
     const rowMeasureForFragment =
       isFirstRowInFragment && fragment.startBorderHeight
-        ? { ...rowMeasure, height: rowMeasure.height + fragment.startBorderHeight }
+        ? { ...rowMeasure, height: rowHeightInFragment(rowIndex) }
         : rowMeasure;
 
     const rowEl = renderTableRow(
@@ -831,7 +838,7 @@ export function renderTableFragment(
   // Add row resize handles at each row boundary (between consecutive rows)
   let handleY = 0;
   for (let rowIdx = fragment.fromRow; rowIdx < fragment.toRow; rowIdx++) {
-    handleY += measure.rows[rowIdx]?.height ?? 0;
+    handleY += rowHeightInFragment(rowIdx);
 
     // Don't add a handle after the last row in this fragment (unless it's the table's last row — that's the bottom edge)
     if (rowIdx < fragment.toRow - 1) {

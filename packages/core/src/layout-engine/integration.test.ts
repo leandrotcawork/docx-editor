@@ -1106,6 +1106,31 @@ describe('Layout Engine - body layout border fidelity', () => {
     expect(fragment.height).toBe(27);
   });
 
+  test('budgets between border height for grouped paragraphs', () => {
+    const borders = {
+      between: { width: 1, style: 'solid', color: '#8b1e2d' },
+    };
+    const blocks: FlowBlock[] = [
+      {
+        ...makeParagraphBlock(0, 'First', 1),
+        attrs: { borders },
+      },
+      {
+        ...makeParagraphBlock(1, 'Second', 8),
+        attrs: { borders },
+      },
+    ];
+    const measures: Measure[] = [
+      makeParagraphMeasure([makeLine(0, 0, 0, 5, 50, 20)]),
+      makeParagraphMeasure([makeLine(0, 0, 0, 6, 60, 20)]),
+    ];
+
+    const layout = layoutDocument(blocks, measures, makeLayoutOptions());
+
+    expect(layout.pages[0].fragments[0].height).toBe(22);
+    expect(layout.pages[0].fragments[1].height).toBe(23);
+  });
+
   test('includes top border redrawn on split table continuation fragments', () => {
     const borderedCell = {
       id: 'cell',

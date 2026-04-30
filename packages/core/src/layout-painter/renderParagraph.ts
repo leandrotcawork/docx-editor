@@ -28,7 +28,11 @@ import {
   type TabStop as TabCalcStop,
 } from '../prosemirror/utils/tabCalculator';
 import { resolveFontFamily } from '../utils/fontResolver';
-import { hasParagraphBorder, paragraphBorderPadding } from '../layout-engine/borders';
+import {
+  hasParagraphBorder,
+  paragraphBorderPadding,
+  paragraphBordersFormGroup,
+} from '../layout-engine/borders';
 
 /**
  * CSS class names for paragraph rendering
@@ -798,30 +802,6 @@ export function renderLine(
   return lineEl;
 }
 
-/**
- * Check if two individual border definitions are equal (same style, width, color).
- */
-function bordersEqual(a?: BorderStyle, b?: BorderStyle): boolean {
-  if (!a && !b) return true;
-  if (!a || !b) return false;
-  return a.style === b.style && a.width === b.width && a.color === b.color;
-}
-
-/**
- * Check if two ParagraphBorders form a group (ECMA-376 §17.3.1.24).
- * Adjacent paragraphs with identical border definitions belong to the same group.
- */
-function bordersFormGroup(a?: ParagraphBorders, b?: ParagraphBorders): boolean {
-  if (!a && !b) return false; // no borders = no group
-  if (!a || !b) return false;
-  return (
-    bordersEqual(a.top, b.top) &&
-    bordersEqual(a.bottom, b.bottom) &&
-    bordersEqual(a.left, b.left) &&
-    bordersEqual(a.right, b.right) &&
-    bordersEqual(a.between, b.between)
-  );
-}
 
 /**
  * Render a paragraph fragment
@@ -972,8 +952,8 @@ export function renderParagraphFragment(
     // - bottom border → only on the last paragraph of the group
     // - between border → rendered as borderTop on interior paragraphs
     // - left/right → on every paragraph in the group
-    const groupedWithPrev = bordersFormGroup(options.prevBorders, borders);
-    const groupedWithNext = bordersFormGroup(borders, options.nextBorders);
+    const groupedWithPrev = paragraphBordersFormGroup(options.prevBorders, borders);
+    const groupedWithNext = paragraphBordersFormGroup(borders, options.nextBorders);
 
     if (groupedWithPrev && borders.between) {
       fragmentEl.style.borderTop = borderToCss(borders.between);

@@ -27,7 +27,7 @@ import type {
 } from './types';
 
 import { createPaginator } from './paginator';
-import { paragraphBorderExtent, tableRowTopBorderHeight } from './borders';
+import { renderedParagraphBorderBoxHeight, tableRowTopBorderHeight } from './borders';
 import {
   computeKeepNextChains,
   calculateChainHeight,
@@ -73,14 +73,17 @@ function nextBlockForcesBreak(blocks: FlowBlock[], index: number): boolean {
 
 function paragraphBorderHeight(
   block: ParagraphBlock,
+  prevBlock: FlowBlock | undefined,
+  nextBlock: FlowBlock | undefined,
   isFirstFragment: boolean,
   isLastFragment: boolean
 ): number {
-  const borders = block.attrs?.borders;
-  if (!borders) return 0;
-  return (
-    (isFirstFragment ? paragraphBorderExtent(borders.top, 2) : 0) +
-    (isLastFragment ? paragraphBorderExtent(borders.bottom, 6) : 0)
+  return renderedParagraphBorderBoxHeight(
+    block.attrs?.borders,
+    prevBlock?.kind === 'paragraph' ? prevBlock.attrs?.borders : undefined,
+    nextBlock?.kind === 'paragraph' ? nextBlock.attrs?.borders : undefined,
+    isFirstFragment,
+    isLastFragment
   );
 }
 
@@ -250,7 +253,9 @@ export function layoutDocument(
           measure as ParagraphMeasure,
           paginator,
           contentWidth,
-          nextBlockForcesBreak(blocks, i)
+          nextBlockForcesBreak(blocks, i),
+          blocks[i - 1],
+          blocks[i + 1]
         );
         break;
 
@@ -315,7 +320,9 @@ function layoutParagraph(
   measure: ParagraphMeasure,
   paginator: ReturnType<typeof createPaginator>,
   contentWidth: number,
-  nextForcesBreak: boolean
+  nextForcesBreak: boolean,
+  prevBlock: FlowBlock | undefined,
+  nextBlock: FlowBlock | undefined
 ): void {
   if (measure.kind !== 'paragraph') {
     throw new Error(`layoutParagraph: expected paragraph measure`);
@@ -326,7 +333,7 @@ function layoutParagraph(
     // Empty paragraph - still takes up space based on spacing
     const spaceBefore = getSpacingBefore(block);
     const spaceAfter = getSpacingAfter(block);
-    const fragmentHeight = paragraphBorderHeight(block, true, true);
+    const fragmentHeight = paragraphBorderHeight(block, prevBlock, nextBlock, true, true);
     const state = paginator.getCurrentState();
 
     // Create minimal fragment
@@ -368,6 +375,8 @@ function layoutParagraph(
       const candidateIsLastFragment = j + 1 >= lines.length;
       const candidateBorderHeight = paragraphBorderHeight(
         block,
+        prevBlock,
+        nextBlock,
         candidateIsFirstFragment,
         candidateIsLastFragment
       );
@@ -391,7 +400,7 @@ function layoutParagraph(
     const isLastFragment = currentLineIndex + fittingLines >= lines.length;
     const effectiveSpaceBefore = isFirstFragment ? spaceBefore : 0;
     const effectiveSpaceAfter = isLastFragment ? spaceAfter : 0;
-    const borderHeight = paragraphBorderHeight(block, isFirstFragment, isLastFragment);
+    const borderHeight = paragraphBorderHeight(block, prevBlock, nextBlock, isFirstFragment, isLastFragment);
     const fragmentHeight = linesHeight + borderHeight;
 
     const fragment: ParagraphFragment = {
