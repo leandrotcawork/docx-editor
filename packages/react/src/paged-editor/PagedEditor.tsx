@@ -50,11 +50,6 @@ import type {
   ImageBlock,
   ImageRun,
   PageMargins,
-  Run,
-  RunFormatting,
-  ParagraphAttrs,
-  ParagraphBorders,
-  ParagraphSpacing,
   TextBoxBlock,
   SectionBreakBlock,
 } from '@eigenpal/docx-core/layout-engine/types';
@@ -71,10 +66,7 @@ import {
 } from '@eigenpal/docx-core/prosemirror';
 
 // Layout bridge
-import {
-  toFlowBlocks,
-  convertBorderSpecToLayout,
-} from '@eigenpal/docx-core/layout-bridge/toFlowBlocks';
+import { toFlowBlocks } from '@eigenpal/docx-core/layout-bridge/toFlowBlocks';
 import {
   measureParagraph,
   resetCanvasContext,
@@ -137,6 +129,7 @@ import {
 import type { RenderedDomContext } from '../plugin-api/types';
 import { createRenderedDomContext } from '../plugin-api/RenderedDomContext';
 import { findVerticalScrollParentOrRoot } from './findVerticalScrollParent';
+import { convertHeaderFooterToContent } from './headerFooterContent';
 
 /**
  * Vertically scroll `container` so `el`'s center aligns with the container's visible center.
@@ -657,7 +650,17 @@ function resolveTableWidthPx(
   return undefined;
 }
 
-function measureTableBlock(tableBlock: TableBlock, contentWidth: number): TableMeasure {
+function cellVerticalBorderHeight(
+  cell: TableBlock['rows'][number]['cells'][number] | undefined,
+  isFirstRow: boolean
+): number {
+  if (!cell?.borders) return 0;
+  const top = isFirstRow ? cell.borders.top?.width ?? 0 : 0;
+  const bottom = cell.borders.bottom?.width ?? 0;
+  return top + bottom;
+}
+
+export function measureTableBlock(tableBlock: TableBlock, contentWidth: number): TableMeasure {
   const DEFAULT_CELL_PADDING_X = 7; // Word default: 108 twips ≈ 7px
   const DEFAULT_CELL_PADDING_Y = 0; // OOXML/TableNormal default: top=0, bottom=0
 
@@ -760,7 +763,7 @@ function measureTableBlock(tableBlock: TableBlock, contentWidth: number): TableM
       }, 0);
       const padTop = sourceCell?.padding?.top ?? DEFAULT_CELL_PADDING_Y;
       const padBottom = sourceCell?.padding?.bottom ?? DEFAULT_CELL_PADDING_Y;
-      cell.height += padTop + padBottom;
+      cell.height += padTop + padBottom + cellVerticalBorderHeight(sourceCell, rowIdx === 0);
       maxHeight = Math.max(maxHeight, cell.height);
     }
 
@@ -1127,472 +1130,6 @@ function measureBlocks(blocks: FlowBlock[], contentWidth: number | number[]): Me
   });
 }
 
-/**
- * Convert document Run content to FlowBlock runs.
- * Handles text, tabs, fields (PAGE, NUMPAGES), etc.
- *
- * Fields like PAGE and NUMPAGES are converted to FieldRun which gets
- * substituted with actual values at render time (in renderParagraph).
- *
- * @param content - Array of ParagraphContent from document
- */
-function convertDocumentRunsToFlowRuns(content: unknown[]): Run[] {
-  const runs: Run[] = [];
-
-  for (const item of content) {
-    const itemObj = item as Record<string, unknown>;
-
-    // Handle Run type (from Document)
-    if (itemObj.type === 'run' && Array.isArray(itemObj.content)) {
-      const formatting = itemObj.formatting as Record<string, unknown> | undefined;
-      const runFormatting: RunFormatting = {};
-
-      if (formatting) {
-        if (formatting.bold) runFormatting.bold = true;
-        if (formatting.italic) runFormatting.italic = true;
-        if (formatting.underline) runFormatting.underline = true;
-        if (formatting.strike) runFormatting.strike = true;
-        if (formatting.color) {
-          const color = formatting.color as Record<string, unknown>;
-          if (color.val) runFormatting.color = `#${color.val}`;
-          else if (color.rgb) runFormatting.color = `#${color.rgb}`;
-        }
-        if (formatting.fontSize) {
-          runFormatting.fontSize = (formatting.fontSize as number) / 2; // half-points to points
-        }
-        if (formatting.fontFamily) {
-          const ff = formatting.fontFamily as Record<string, unknown>;
-          runFormatting.fontFamily = (ff.ascii || ff.hAnsi) as string;
-        }
-      }
-
-      // Process run content
-      for (const runContent of itemObj.content as unknown[]) {
-        const rc = runContent as Record<string, unknown>;
-
-        if (rc.type === 'text' && typeof rc.text === 'string') {
-          runs.push({
-            kind: 'text',
-            text: rc.text,
-            ...runFormatting,
-          });
-        } else if (rc.type === 'tab') {
-          runs.push({
-            kind: 'tab',
-            ...runFormatting,
-          });
-        } else if (rc.type === 'break') {
-          runs.push({
-            kind: 'lineBreak',
-          });
-        } else if (rc.type === 'drawing' && rc.image) {
-          // Handle images/drawings
-          const image = rc.image as Record<string, unknown>;
-          const size = image.size as { width: number; height: number } | undefined;
-          // EMU to pixels: 1 inch = 914400 EMU, 1 inch = 96 pixels
-          const emuToPixels = (emu: number) => Math.round((emu / 914400) * 96);
-          const widthPx = size?.width ? emuToPixels(size.width) : 100;
-          const heightPx = size?.height ? emuToPixels(size.height) : 100;
-
-          // Check for position (floating/anchored images)
-          const position = image.position as
-            | {
-                horizontal?: { relativeTo?: string; posOffset?: number; align?: string };
-                vertical?: { relativeTo?: string; posOffset?: number; align?: string };
-              }
-            | undefined;
-
-          runs.push({
-            kind: 'image',
-            src: (image.src as string) || '',
-            width: widthPx,
-            height: heightPx,
-            alt: (image.alt as string) || undefined,
-            // Include position for floating images
-            position: position
-              ? {
-                  horizontal: position.horizontal,
-                  vertical: position.vertical,
-                }
-              : undefined,
-          } as Run);
-        }
-      }
-    }
-
-    // Handle SimpleField (w:fldSimple) - PAGE, NUMPAGES, etc.
-    if (itemObj.type === 'simpleField') {
-      const fieldType = itemObj.fieldType as string;
-
-      // Extract formatting from content runs (same approach as ComplexField)
-      const fieldFormatting: RunFormatting = {};
-      if (Array.isArray(itemObj.content) && itemObj.content.length > 0) {
-        const firstRun = itemObj.content[0] as Record<string, unknown>;
-        if (firstRun?.type === 'run' && firstRun.formatting) {
-          const formatting = firstRun.formatting as Record<string, unknown>;
-          if (formatting.fontSize) {
-            fieldFormatting.fontSize = (formatting.fontSize as number) / 2;
-          }
-          if (formatting.fontFamily) {
-            const ff = formatting.fontFamily as Record<string, unknown>;
-            fieldFormatting.fontFamily = (ff.ascii || ff.hAnsi) as string;
-          }
-          if (formatting.bold) fieldFormatting.bold = true;
-          if (formatting.italic) fieldFormatting.italic = true;
-          if (formatting.color) {
-            const c = formatting.color as Record<string, unknown>;
-            const val = (c.rgb || c.val) as string | undefined;
-            if (val) fieldFormatting.color = val.startsWith('#') ? val : `#${val}`;
-          }
-        }
-      }
-
-      if (fieldType === 'PAGE') {
-        runs.push({
-          kind: 'field',
-          fieldType: 'PAGE',
-          fallback: '1',
-          ...fieldFormatting,
-        });
-      } else if (fieldType === 'NUMPAGES') {
-        runs.push({
-          kind: 'field',
-          fieldType: 'NUMPAGES',
-          fallback: '1',
-          ...fieldFormatting,
-        });
-      } else if (Array.isArray(itemObj.content)) {
-        // Use the display content for other fields
-        const displayRuns = convertDocumentRunsToFlowRuns(itemObj.content as unknown[]);
-        runs.push(...displayRuns);
-      }
-      continue;
-    }
-
-    // Handle ComplexField (fldChar sequence)
-    if (itemObj.type === 'complexField') {
-      const fieldType = itemObj.fieldType as string;
-
-      // Extract formatting from fieldResult runs if available
-      const fieldFormatting: RunFormatting = {};
-      if (Array.isArray(itemObj.fieldResult) && itemObj.fieldResult.length > 0) {
-        const firstRun = itemObj.fieldResult[0] as Record<string, unknown>;
-        if (firstRun?.type === 'run' && firstRun.formatting) {
-          const formatting = firstRun.formatting as Record<string, unknown>;
-          if (formatting.fontSize) {
-            fieldFormatting.fontSize = (formatting.fontSize as number) / 2;
-          }
-          if (formatting.fontFamily) {
-            const ff = formatting.fontFamily as Record<string, unknown>;
-            fieldFormatting.fontFamily = (ff.ascii || ff.hAnsi) as string;
-          }
-          if (formatting.bold) fieldFormatting.bold = true;
-          if (formatting.italic) fieldFormatting.italic = true;
-          if (formatting.color) {
-            const c = formatting.color as Record<string, unknown>;
-            const val = (c.rgb || c.val) as string | undefined;
-            if (val) fieldFormatting.color = val.startsWith('#') ? val : `#${val}`;
-          }
-        }
-      }
-
-      if (fieldType === 'PAGE') {
-        runs.push({
-          kind: 'field',
-          fieldType: 'PAGE',
-          fallback: '1',
-          ...fieldFormatting,
-        });
-      } else if (fieldType === 'NUMPAGES') {
-        runs.push({
-          kind: 'field',
-          fieldType: 'NUMPAGES',
-          fallback: '1',
-          ...fieldFormatting,
-        });
-      } else if (Array.isArray(itemObj.fieldResult)) {
-        // Use the fieldResult for other fields
-        const displayRuns = convertDocumentRunsToFlowRuns(itemObj.fieldResult as unknown[]);
-        runs.push(...displayRuns);
-      }
-    }
-
-    // Handle Hyperlink
-    if (itemObj.type === 'hyperlink' && Array.isArray(itemObj.children)) {
-      const childRuns = convertDocumentRunsToFlowRuns(itemObj.children as unknown[]);
-      runs.push(...childRuns);
-    }
-  }
-
-  return runs;
-}
-
-type HeaderFooterMetrics = {
-  section: 'header' | 'footer';
-  pageSize: { w: number; h: number };
-  margins: PageMargins;
-};
-
-type PositionedAxis = {
-  relativeTo?: string;
-  posOffset?: number;
-  align?: string;
-  alignment?: string;
-};
-
-function getPositionAlignment(axis: PositionedAxis | undefined): string | undefined {
-  return axis?.align ?? axis?.alignment;
-}
-
-function resolveHeaderFooterVisualTop(
-  run: ImageRun,
-  paragraphY: number,
-  flowHeight: number,
-  metrics: HeaderFooterMetrics
-): number {
-  const flowTop =
-    metrics.section === 'header'
-      ? (metrics.margins.header ?? 48)
-      : metrics.pageSize.h - (metrics.margins.footer ?? 48) - flowHeight;
-  const vertical = run.position?.vertical;
-
-  if (!vertical) {
-    return paragraphY;
-  }
-
-  const align = getPositionAlignment(vertical);
-  const offsetPx = vertical.posOffset !== undefined ? emuToPixels(vertical.posOffset) : undefined;
-
-  if (vertical.relativeTo === 'page') {
-    if (offsetPx !== undefined) return offsetPx - flowTop;
-    if (align === 'top') return -flowTop;
-    if (align === 'bottom') return metrics.pageSize.h - run.height - flowTop;
-    if (align === 'center') return (metrics.pageSize.h - run.height) / 2 - flowTop;
-  }
-
-  if (vertical.relativeTo === 'margin') {
-    const marginTop = metrics.margins.top;
-    const marginHeight = metrics.pageSize.h - metrics.margins.top - metrics.margins.bottom;
-    if (offsetPx !== undefined) return marginTop + offsetPx - flowTop;
-    if (align === 'top') return marginTop - flowTop;
-    if (align === 'bottom') return marginTop + marginHeight - run.height - flowTop;
-    if (align === 'center') return marginTop + (marginHeight - run.height) / 2 - flowTop;
-  }
-
-  if (offsetPx !== undefined) {
-    return paragraphY + offsetPx;
-  }
-
-  return paragraphY;
-}
-
-function calculateHeaderFooterVisualBounds(
-  blocks: FlowBlock[],
-  measures: Measure[],
-  flowHeight: number,
-  metrics: HeaderFooterMetrics
-): { visualTop: number; visualBottom: number } {
-  let visualTop = 0;
-  let visualBottom = flowHeight;
-  let cursorY = 0;
-
-  for (let i = 0; i < blocks.length; i++) {
-    const block = blocks[i];
-    const measure = measures[i];
-    if (block?.kind !== 'paragraph' || measure?.kind !== 'paragraph') {
-      continue;
-    }
-
-    const paragraphBlock = block as ParagraphBlock;
-    const paragraphStartY = cursorY;
-    const paragraphBottomY = paragraphStartY + measure.totalHeight;
-    visualTop = Math.min(visualTop, paragraphStartY);
-    visualBottom = Math.max(visualBottom, paragraphBottomY);
-
-    for (const run of paragraphBlock.runs) {
-      if (run.kind !== 'image' || !run.position) continue;
-      const imageRun = run as ImageRun;
-      const runTop = resolveHeaderFooterVisualTop(imageRun, paragraphStartY, flowHeight, metrics);
-      visualTop = Math.min(visualTop, runTop);
-      visualBottom = Math.max(visualBottom, runTop + imageRun.height);
-    }
-
-    cursorY = paragraphBottomY;
-  }
-
-  return { visualTop, visualBottom };
-}
-
-/**
- * Convert HeaderFooter (document type) to HeaderFooterContent (render type).
- *
- * This converts parsed header/footer content into FlowBlocks that can be
- * rendered by the layout painter.
- *
- * Fields like PAGE and NUMPAGES are converted to FieldRun which gets
- * substituted with actual values at render time.
- *
- * @param headerFooter - The header/footer document content
- * @param contentWidth - Available width for content
- */
-function convertHeaderFooterToContent(
-  headerFooter: HeaderFooter | null | undefined,
-  contentWidth: number,
-  metrics: HeaderFooterMetrics
-): HeaderFooterContent | undefined {
-  if (!headerFooter || !headerFooter.content || headerFooter.content.length === 0) {
-    return undefined;
-  }
-
-  const blocks: FlowBlock[] = [];
-
-  for (const item of headerFooter.content) {
-    const itemObj = item as unknown as Record<string, unknown>;
-
-    // Check for Document Paragraph type
-    if (itemObj.type === 'paragraph' && Array.isArray(itemObj.content)) {
-      const formatting = itemObj.formatting as Record<string, unknown> | undefined;
-      const attrs: ParagraphAttrs = {};
-
-      if (formatting) {
-        if (formatting.alignment) {
-          const align = formatting.alignment as string;
-          if (align === 'both') attrs.alignment = 'justify';
-          else if (['left', 'center', 'right', 'justify'].includes(align)) {
-            attrs.alignment = align as 'left' | 'center' | 'right' | 'justify';
-          }
-        }
-        // Convert paragraph borders (e.g., header bottom line, footer top line)
-        if (formatting.borders) {
-          const borders = formatting.borders as Record<string, unknown>;
-          const converted: ParagraphBorders = {};
-          for (const side of ['top', 'bottom', 'left', 'right', 'between'] as const) {
-            const b = borders[side] as
-              | { style?: string; size?: number; color?: Record<string, string> }
-              | undefined;
-            if (b) {
-              const layoutBorder = convertBorderSpecToLayout(b);
-              if (layoutBorder) converted[side] = layoutBorder;
-            }
-          }
-          if (Object.keys(converted).length > 0) {
-            attrs.borders = converted;
-          }
-        }
-        // Convert spacing for measurement.
-        // NOTE: Only convert lineSpacing (affects line height). Skip spaceBefore/
-        // spaceAfter — these are typically style-resolved artifacts (e.g., from
-        // Normal style) inlined during the PM→document round-trip, not intentional
-        // header/footer formatting. The layout painter renders header/footer
-        // paragraphs without inter-paragraph margins, so measurement must match.
-        if (formatting.lineSpacing != null) {
-          const spacingAttrs: ParagraphSpacing = {};
-          const rule = formatting.lineSpacingRule as string | undefined;
-          if (rule === 'exact' || rule === 'atLeast') {
-            spacingAttrs.line = twipsToPixels(formatting.lineSpacing as number);
-            spacingAttrs.lineUnit = 'px';
-            spacingAttrs.lineRule = rule;
-          } else {
-            // Auto — line spacing is in 240ths of a line
-            spacingAttrs.line = (formatting.lineSpacing as number) / 240;
-            spacingAttrs.lineUnit = 'multiplier';
-            spacingAttrs.lineRule = 'auto';
-          }
-          attrs.spacing = spacingAttrs;
-        }
-        // Convert tab stops (needed for center/right tab alignment in headers/footers)
-        if (Array.isArray(formatting.tabs) && formatting.tabs.length > 0) {
-          attrs.tabs = (
-            formatting.tabs as Array<{
-              position: number;
-              alignment: string;
-              leader?: string;
-            }>
-          ).map((tab) => {
-            const align =
-              tab.alignment === 'left'
-                ? 'start'
-                : tab.alignment === 'right'
-                  ? 'end'
-                  : tab.alignment;
-            return {
-              val: align as 'start' | 'end' | 'center' | 'decimal' | 'bar' | 'clear',
-              pos: twipsToPixels(tab.position),
-              leader: tab.leader as
-                | 'none'
-                | 'dot'
-                | 'hyphen'
-                | 'underscore'
-                | 'heavy'
-                | 'middleDot'
-                | undefined,
-            };
-          });
-        }
-      }
-
-      const runs = convertDocumentRunsToFlowRuns(itemObj.content as unknown[]);
-
-      // Empty paragraphs (blank lines) should still measure — add empty text run
-      if (runs.length === 0) {
-        runs.push({ kind: 'text' as const, text: '' });
-      }
-      const paragraphBlock: ParagraphBlock = {
-        kind: 'paragraph',
-        id: String(blocks.length),
-        runs,
-        attrs: Object.keys(attrs).length > 0 ? attrs : undefined,
-      };
-      blocks.push(paragraphBlock);
-    }
-  }
-
-  if (blocks.length === 0) {
-    return undefined;
-  }
-
-  // Build blocks for measurement that exclude floating images
-  // (floating images are positioned absolutely, don't affect paragraph height)
-  const blocksForMeasure: FlowBlock[] = blocks.map((block) => {
-    if (block.kind !== 'paragraph') return block;
-    const pb = block as ParagraphBlock;
-    const hasFloating = pb.runs.some(
-      (r) => r.kind === 'image' && 'position' in r && (r as Record<string, unknown>).position
-    );
-    if (!hasFloating) return block;
-    const inlineRuns = pb.runs.filter(
-      (r) => !(r.kind === 'image' && 'position' in r && (r as Record<string, unknown>).position)
-    );
-    // If only floating images remain, add an empty text run so the paragraph still measures
-    if (inlineRuns.length === 0) {
-      inlineRuns.push({ kind: 'text' as const, text: '' });
-    }
-    return { ...pb, runs: inlineRuns };
-  });
-
-  const measures = measureBlocks(blocksForMeasure, contentWidth);
-  const totalHeight = measures.reduce((h, m) => {
-    if (m.kind === 'paragraph') {
-      return h + m.totalHeight;
-    }
-    return h;
-  }, 0);
-  const { visualTop, visualBottom } = calculateHeaderFooterVisualBounds(
-    blocks,
-    measures,
-    totalHeight,
-    metrics
-  );
-
-  return {
-    blocks,
-    measures,
-    height: totalHeight,
-    visualTop,
-    visualBottom,
-  };
-}
-
 // =============================================================================
 // FOOTNOTE HELPERS
 // =============================================================================
@@ -1942,19 +1479,21 @@ const PagedEditorComponent = forwardRef<PagedEditorRef, PagedEditorProps>(
           const headerContentForRender = convertHeaderFooterToContent(
             headerContent,
             contentWidth,
-            hfMetricsHeader
+            hfMetricsHeader,
+            measureBlocks
           );
           const footerContentForRender = convertHeaderFooterToContent(
             footerContent,
             contentWidth,
-            hfMetricsFooter
+            hfMetricsFooter,
+            measureBlocks
           );
           const hasTitlePg = sectionProperties?.titlePg === true;
           const firstPageHeaderForRender = hasTitlePg
-            ? convertHeaderFooterToContent(firstPageHeaderContent, contentWidth, hfMetricsHeader)
+            ? convertHeaderFooterToContent(firstPageHeaderContent, contentWidth, hfMetricsHeader, measureBlocks)
             : undefined;
           const firstPageFooterForRender = hasTitlePg
-            ? convertHeaderFooterToContent(firstPageFooterContent, contentWidth, hfMetricsFooter)
+            ? convertHeaderFooterToContent(firstPageFooterContent, contentWidth, hfMetricsFooter, measureBlocks)
             : undefined;
 
           // Adjust margins if header/footer content exceeds available space

@@ -17,15 +17,21 @@ import React, {
   forwardRef,
 } from 'react';
 import type { CSSProperties } from 'react';
-import { EditorState } from 'prosemirror-state';
 import { useTranslation } from '../i18n';
-import { EditorView } from 'prosemirror-view';
-import { undo, redo } from 'prosemirror-history';
 
 import { schema } from '@eigenpal/docx-core/prosemirror/schema';
 import { headerFooterToProseDoc } from '@eigenpal/docx-core/prosemirror/conversion/toProseDoc';
 import { proseDocToBlocks } from '@eigenpal/docx-core/prosemirror/conversion/fromProseDoc';
-import { extractSelectionState, type SelectionState } from '@eigenpal/docx-core/prosemirror';
+import {
+  CellSelection,
+  EditorState,
+  EditorView,
+  extractSelectionState,
+  redo,
+  TextSelection,
+  undo,
+  type SelectionState,
+} from '@eigenpal/docx-core/prosemirror';
 import { createStarterKit } from '@eigenpal/docx-core/prosemirror/extensions/StarterKit';
 import { ExtensionManager } from '@eigenpal/docx-core/prosemirror/extensions/ExtensionManager';
 import { createStyleResolver } from '@eigenpal/docx-core/prosemirror';
@@ -59,6 +65,8 @@ export interface InlineHeaderFooterEditorProps {
   onClose: () => void;
   /** Callback when selection changes in the HF editor (for toolbar sync) */
   onSelectionChange?: (state: SelectionState | null) => void;
+  /** Callback for context menu events inside the inline editor */
+  onContextMenu?: (data: { x: number; y: number; hasSelection: boolean }) => void;
   /** Callback to remove the header/footer entirely */
   onRemove?: () => void;
 }
@@ -145,6 +153,7 @@ export const InlineHeaderFooterEditor = forwardRef<
     onSave,
     onClose,
     onSelectionChange,
+    onContextMenu,
     onRemove,
   },
   ref
@@ -164,6 +173,80 @@ export const InlineHeaderFooterEditor = forwardRef<
   }, [styles]);
   const [showOptions, setShowOptions] = useState(false);
   const optionsRef = useRef<HTMLDivElement>(null);
+
+  const selectTableCellFromElement = useCallback((cellElement: HTMLElement): boolean => {
+    const view = viewRef.current;
+    if (!view) return false;
+
+    let cellPos: number | null = null;
+
+    try {
+      const domPos = view.posAtDOM(cellElement, 0);
+      const $pos = view.state.doc.resolve(domPos);
+      for (let depth = $pos.depth; depth > 0; depth--) {
+        const node = $pos.node(depth);
+        if (node.type.name === 'tableCell' || node.type.name === 'tableHeader') {
+          cellPos = $pos.before(depth);
+          break;
+        }
+      }
+    } catch {
+      return false;
+    }
+
+    if (cellPos === null) return false;
+
+    try {
+      const selection = CellSelection.create(view.state.doc, cellPos, cellPos);
+      view.dispatch(view.state.tr.setSelection(selection));
+      view.focus();
+      return true;
+    } catch {
+      return false;
+    }
+  }, []);
+
+  const handleContextMenu = useCallback(
+    (e: React.MouseEvent<HTMLDivElement>) => {
+      const view = viewRef.current;
+      if (!onContextMenu || !view) return;
+      e.preventDefault();
+      e.stopPropagation();
+
+      const { from, to } = view.state.selection;
+      const posAtClick = view.posAtCoords({ left: e.clientX, top: e.clientY });
+      if (posAtClick && (from === to || posAtClick.pos < from || posAtClick.pos > to)) {
+        try {
+          const $pos = view.state.doc.resolve(posAtClick.pos);
+          view.dispatch(view.state.tr.setSelection(TextSelection.near($pos)));
+          view.focus();
+        } catch {
+          // If the click maps to a non-text position, keep the current selection.
+        }
+      }
+
+      const updatedSelection = view.state.selection;
+      onContextMenu({
+        x: e.clientX,
+        y: e.clientY,
+        hasSelection: updatedSelection.from !== updatedSelection.to,
+      });
+    },
+    [onContextMenu]
+  );
+
+  const handleDoubleClick = useCallback(
+    (e: React.MouseEvent<HTMLDivElement>) => {
+      const target = e.target as HTMLElement | null;
+      const cell = target?.closest('td,th');
+      if (!cell || !editorContainerRef.current?.contains(cell)) return;
+      if (selectTableCellFromElement(cell as HTMLElement)) {
+        e.preventDefault();
+        e.stopPropagation();
+      }
+    },
+    [selectTableCellFromElement]
+  );
 
   // Compute overlay position relative to the parent element
   const [overlayPos, setOverlayPos] = useState<{
@@ -328,6 +411,8 @@ export const InlineHeaderFooterEditor = forwardRef<
         // Prevent clicks from bubbling to pages container / body click handler
         e.stopPropagation();
       }}
+      onContextMenu={handleContextMenu}
+      onDoubleClickCapture={handleDoubleClick}
     >
       {/* Separator bar — shown below for header, above for footer */}
       {position === 'footer' && (

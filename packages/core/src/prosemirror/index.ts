@@ -35,7 +35,12 @@ export { extractSelectionState } from './selectionState';
 export type { SelectionState } from './selectionState';
 
 // Re-export TextSelection for restoring selections after toolbar interactions
-export { TextSelection } from 'prosemirror-state';
+export { EditorState, TextSelection } from 'prosemirror-state';
+export { EditorView } from 'prosemirror-view';
+export { undo, redo } from 'prosemirror-history';
+// Re-export CellSelection and the editor primitives so React integration code
+// uses the same ProseMirror module instances as the plugins registered by core.
+export { CellSelection } from 'prosemirror-tables';
 
 // Plugins (selection tracker only — keymaps are now in extension system)
 export {

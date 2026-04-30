@@ -3073,7 +3073,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
 
   // Right-click context menu handlers
   const handleContextMenu = useCallback((data: { x: number; y: number; hasSelection: boolean }) => {
-    const view = pagedEditorRef.current?.getView();
+    const view = getActiveEditorView();
     const tableContext = view ? getTableContext(view.state) : { isInTable: false };
     setContextMenu({
       isOpen: true,
@@ -3082,7 +3082,7 @@ export const DocxEditor = forwardRef<DocxEditorRef, DocxEditorProps>(function Do
       cursorInTable: tableContext.isInTable,
       tableContext: tableContext.isInTable ? tableContext : null,
     });
-  }, []);
+  }, [getActiveEditorView]);
 
   const handleContextMenuClose = useCallback(() => {
     setContextMenu({
@@ -5174,6 +5174,7 @@ body { background: white; }
                               onSave={handleHeaderFooterSave}
                               onClose={() => setHfEditPosition(null)}
                               onSelectionChange={handleSelectionChange}
+                              onContextMenu={handleContextMenu}
                               onRemove={handleRemoveHeaderFooter}
                             />
                           );

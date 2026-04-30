@@ -500,7 +500,7 @@
 .hf-editor-pm .ProseMirror {
   outline: none;
   min-height: 40px;
-  padding: 4px;
+  padding: 0;
 }
 .hf-editor-pm .ProseMirror:focus {
   outline: none;
@@ -513,6 +513,87 @@
   white-space: pre-wrap;
   word-wrap: break-word;
   line-height: normal;
+}
+
+/* Match the inline header/footer editor table geometry to the static painter. */
+.hf-editor-pm .ProseMirror .tableWrapper {
+  overflow: visible;
+}
+
+.hf-editor-pm .ProseMirror table {
+  border-collapse: separate !important;
+  border-spacing: 0 !important;
+  table-layout: fixed !important;
+  margin: 0;
+}
+
+.hf-editor-pm .ProseMirror td.docx-table-cell,
+.hf-editor-pm .ProseMirror th.docx-table-header {
+  box-sizing: border-box !important;
+}
+
+/* Remove the parent paragraph font strut; run spans keep their DOCX font metrics. */
+.hf-editor-pm .ProseMirror td p:has(img),
+.hf-editor-pm .ProseMirror th p:has(img),
+.hf-editor-pm .ProseMirror td p:has(span),
+.hf-editor-pm .ProseMirror th p:has(span) {
+  font-size: 0 !important;
+  line-height: 0 !important;
+}
+
+.hf-editor-pm .ProseMirror td p span:not(:has(> span)),
+.hf-editor-pm .ProseMirror th p span:not(:has(> span)) {
+  position: relative;
+  top: 0.2em;
+}
+
+.hf-editor-pm .ProseMirror td,
+.hf-editor-pm .ProseMirror th {
+  position: relative;
+}
+
+.hf-editor-pm .ProseMirror .activeCell {
+  outline: 2px solid rgba(66, 133, 244, 0.5);
+  outline-offset: -2px;
+}
+
+.hf-editor-pm .ProseMirror .selectedCell {
+  background-color: rgba(66, 133, 244, 0.15);
+}
+
+.hf-editor-pm .ProseMirror .selectedCell::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: rgba(66, 133, 244, 0.1);
+  pointer-events: none;
+}
+
+.hf-editor-pm .ProseMirror .column-resize-handle {
+  position: absolute;
+  right: -2px;
+  top: 0;
+  bottom: 0;
+  width: 4px;
+  background-color: rgba(66, 133, 244, 0.5);
+  cursor: col-resize;
+  z-index: 20;
+}
+
+.hf-editor-pm .ProseMirror.resize-cursor {
+  cursor: col-resize;
+}
+
+.hf-editor-pm .ProseMirror table:not(:hover) .column-resize-handle {
+  background-color: transparent;
+}
+
+.hf-editor-pm .ProseMirror table:hover .column-resize-handle {
+  background-color: rgba(66, 133, 244, 0.3);
+}
+
+.hf-editor-pm .ProseMirror .column-resize-handle:hover {
+  background-color: rgba(66, 133, 244, 0.7);
 }
 
 /* Dim body content when editing header/footer */

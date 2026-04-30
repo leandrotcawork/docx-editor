@@ -424,20 +424,10 @@ function renderFieldRun(run: FieldRun, doc: Document, context: RenderContext): H
     // OTHER fields use fallback
   }
 
-  // Create a text run with the resolved value
   const resolvedRun: TextRun = {
-    kind: 'text',
+    ...run,
     text,
-    bold: run.bold,
-    italic: run.italic,
-    underline: run.underline,
-    strike: run.strike,
-    color: run.color,
-    highlight: run.highlight,
-    fontFamily: run.fontFamily,
-    fontSize: run.fontSize,
-    pmStart: run.pmStart,
-    pmEnd: run.pmEnd,
+    kind: 'text',
   };
 
   return renderTextRun(resolvedRun, doc, context?.resolvedCommentIds);
@@ -932,6 +922,15 @@ export function renderParagraphFragment(
   // Note: Line spacing is applied per-line div (renderLine sets lineEl.style.height
   // and lineEl.style.lineHeight), not at fragment level. Fragment-level line-height
   // was removed to avoid conflicts with the explicit per-line pixel heights.
+  if (context.section === 'header' || context.section === 'footer') {
+    const spacing = block.attrs?.spacing;
+    if (spacing?.before && !fragment.continuesFromPrev) {
+      fragmentEl.style.marginTop = `${spacing.before}px`;
+    }
+    if (spacing?.after && !fragment.continuesOnNext) {
+      fragmentEl.style.marginBottom = `${spacing.after}px`;
+    }
+  }
 
   // Apply borders
   const borders = block.attrs?.borders;

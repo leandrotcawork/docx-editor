@@ -17,6 +17,7 @@ import { Selection, type Command } from 'prosemirror-state';
 import { Decoration, DecorationSet } from 'prosemirror-view';
 import {
   columnResizing,
+  columnResizingPluginKey,
   tableEditing,
   mergeCells as pmMergeCells,
   splitCell as pmSplitCell,
@@ -301,14 +302,17 @@ function buildCellBorderStyles(attrs: TableCellAttrs): string[] {
   const borderToCss = (border?: {
     style?: string;
     size?: number;
-    color?: { rgb?: string };
+    color?: ColorValue;
   }): string => {
     if (!border || !border.style || border.style === 'none' || border.style === 'nil') {
       return 'none';
     }
     const widthPx = border.size ? Math.max(1, Math.round((border.size / 8) * 1.333)) : 1;
     const cssStyle = BORDER_STYLE_CSS[border.style] || 'solid';
-    const color = border.color?.rgb ? `#${border.color.rgb}` : '#000000';
+    const color =
+      border.color?.rgb && border.color.rgb !== 'auto' && !border.color.auto
+        ? `#${border.color.rgb}`
+        : '#000000';
     return `${widthPx}px ${cssStyle} ${color}`;
   };
 
@@ -819,14 +823,259 @@ export const TablePluginExtension = createExtension({
       };
     }
 
+    function applyEqualFixedColumnGrid(
+      tr: Transaction,
+      tablePos: number,
+      table: PMNode,
+      columnCount: number
+    ): Transaction {
+      const existingDxaWidth =
+        table.attrs.widthType === 'dxa' ? (table.attrs.width as number | null) : null;
+      if (!existingDxaWidth) {
+        return tr;
+      }
+      const currentWidths = getFirstRowColwidths(table);
+      const tableWidthPx = Math.round(existingDxaWidth / 15);
+      const widthsPx =
+        currentWidths && currentWidths.length === columnCount
+          ? normalizeFixedResizeWidths(null, currentWidths, tableWidthPx) ?? currentWidths
+          : distributeEvenly(tableWidthPx, columnCount);
+      const widthsTwips = distributeTwipsFromPixelWeights(widthsPx, existingDxaWidth);
+
+      let nextTr = tr;
+      let rowPos = tablePos + 1;
+      table.forEach((row) => {
+        if (row.type.name === 'tableRow') {
+          let columnIndex = 0;
+          let cellPos = rowPos + 1;
+          row.forEach((cell) => {
+            if (cell.type.name === 'tableCell' || cell.type.name === 'tableHeader') {
+              const colspan = (cell.attrs.colspan as number) || 1;
+              const cellWidthsTwips = widthsTwips.slice(columnIndex, columnIndex + colspan);
+              nextTr = nextTr.setNodeMarkup(cellPos, undefined, {
+                ...cell.attrs,
+                width: cellWidthsTwips.reduce((sum, width) => sum + width, 0),
+                widthType: 'dxa',
+                colwidth: cellWidthsTwips.map((width) => Math.max(1, Math.round(width / 15))),
+              });
+              columnIndex += colspan;
+            }
+            cellPos += cell.nodeSize;
+          });
+        }
+        rowPos += row.nodeSize;
+      });
+
+      return nextTr.setNodeMarkup(tablePos, undefined, {
+        ...table.attrs,
+        width: existingDxaWidth,
+        widthType: 'dxa',
+        columnWidths: widthsTwips,
+      });
+    }
+
+    function clearNonFixedColumnGrid(tr: Transaction, tablePos: number, table: PMNode): Transaction {
+      if (table.attrs.widthType === 'dxa' || !table.attrs.columnWidths) return tr;
+
+      return tr.setNodeMarkup(tablePos, undefined, {
+        ...table.attrs,
+        columnWidths: null,
+      });
+    }
+
+    function distributeEvenly(total: number, count: number): number[] {
+      const safeCount = Math.max(1, count);
+      const base = Math.floor(total / safeCount);
+      const widths = Array(safeCount).fill(base);
+      widths[widths.length - 1] += total - base * safeCount;
+      return widths;
+    }
+
+    function distributeTwipsFromPixelWeights(widthsPx: number[], totalTwips: number): number[] {
+      const totalPx = widthsPx.reduce((sum, width) => sum + width, 0);
+      if (!totalPx) return distributeEvenly(totalTwips, widthsPx.length);
+
+      let assigned = 0;
+      return widthsPx.map((width, index) => {
+        if (index === widthsPx.length - 1) return totalTwips - assigned;
+        const nextWidth = Math.max(1, Math.round((width / totalPx) * totalTwips));
+        assigned += nextWidth;
+        return nextWidth;
+      });
+    }
+
+    function getLogicalColumnCount(table: PMNode): number {
+      let columnCount = 0;
+      table.forEach((row) => {
+        if (row.type.name === 'tableRow') {
+          let rowColumnCount = 0;
+          row.forEach((cell) => {
+            rowColumnCount += (cell.attrs.colspan as number) || 1;
+          });
+          columnCount = Math.max(columnCount, rowColumnCount);
+        }
+      });
+      return columnCount;
+    }
+
+    function getFixedTableTargetPx(table: PMNode): number | null {
+      if (table.attrs.widthType === 'dxa' && typeof table.attrs.width === 'number') {
+        return Math.round(table.attrs.width / 15);
+      }
+      return null;
+    }
+
+    function getFirstRowColwidths(table: PMNode): number[] | null {
+      const firstRow = table.firstChild;
+      if (!firstRow || firstRow.type.name !== 'tableRow') return null;
+
+      const widths: number[] = [];
+      firstRow.forEach((cell) => {
+        const colwidth = cell.attrs.colwidth as number[] | null;
+        if (!colwidth?.length) return;
+        widths.push(...colwidth);
+      });
+
+      return widths.length === getLogicalColumnCount(table) ? widths : null;
+    }
+
+    function normalizeFixedResizeWidths(
+      previousWidths: number[] | null,
+      currentWidths: number[],
+      targetTotal: number
+    ): number[] | null {
+      const currentTotal = currentWidths.reduce((sum, width) => sum + width, 0);
+      if (currentTotal === targetTotal) return null;
+
+      const minWidth = 25;
+      const changed =
+        previousWidths?.length === currentWidths.length
+          ? currentWidths
+              .map((width, index) => (width !== previousWidths[index] ? index : -1))
+              .filter((index) => index !== -1)
+          : [];
+
+      if (changed.length === 1) {
+        const changedIndex = changed[0];
+        const result = [...currentWidths];
+        const fixedWidth = Math.min(
+          Math.max(minWidth, currentWidths[changedIndex]),
+          targetTotal - minWidth * (currentWidths.length - 1)
+        );
+        result[changedIndex] = fixedWidth;
+
+        const remainingIndexes = result
+          .map((_, index) => index)
+          .filter((index) => index !== changedIndex);
+        const remainingTotal = targetTotal - fixedWidth;
+        const previousRemainingTotal = remainingIndexes.reduce(
+          (sum, index) => sum + (previousWidths?.[index] ?? currentWidths[index]),
+          0
+        );
+
+        let assigned = 0;
+        remainingIndexes.forEach((index, offset) => {
+          const isLast = offset === remainingIndexes.length - 1;
+          const nextWidth = isLast
+            ? remainingTotal - assigned
+            : Math.max(
+                minWidth,
+                Math.round(
+                  remainingTotal *
+                    ((previousWidths?.[index] ?? currentWidths[index]) / previousRemainingTotal)
+                )
+              );
+          result[index] = nextWidth;
+          assigned += nextWidth;
+        });
+
+        return result;
+      }
+
+      let assigned = 0;
+      return currentWidths.map((width, index) => {
+        if (index === currentWidths.length - 1) return targetTotal - assigned;
+        const nextWidth = Math.max(minWidth, Math.round((width / currentTotal) * targetTotal));
+        assigned += nextWidth;
+        return nextWidth;
+      });
+    }
+
+    function applyColumnWidthsToTable(tr: Transaction, tablePos: number, widthsPx: number[]) {
+      let nextTr = tr;
+      const table = tr.doc.nodeAt(tablePos);
+      if (!table || table.type.name !== 'table') return nextTr;
+
+      let rowPos = tablePos + 1;
+      table.forEach((row) => {
+        if (row.type.name === 'tableRow') {
+          let columnIndex = 0;
+          let cellPos = rowPos + 1;
+          row.forEach((cell) => {
+            if (cell.type.name === 'tableCell' || cell.type.name === 'tableHeader') {
+              const colspan = (cell.attrs.colspan as number) || 1;
+              const colwidth = widthsPx.slice(columnIndex, columnIndex + colspan);
+              nextTr = nextTr.setNodeMarkup(cellPos, undefined, {
+                ...cell.attrs,
+                width: colwidth.reduce((sum, width) => sum + width, 0) * 15,
+                widthType: 'dxa',
+                colwidth,
+              });
+              columnIndex += colspan;
+            }
+            cellPos += cell.nodeSize;
+          });
+        }
+        rowPos += row.nodeSize;
+      });
+
+      return nextTr.setNodeMarkup(tablePos, undefined, {
+        ...table.attrs,
+        columnWidths: widthsPx.map((width) => width * 15),
+      });
+    }
+
+    const fixedResizeNormalizerKey = new PluginKey('fixedTableResizeNormalizer');
+    const fixedResizeNormalizerPlugin = new Plugin({
+      key: fixedResizeNormalizerKey,
+      appendTransaction(transactions, oldState, newState) {
+        if (!transactions.some((tr) => tr.docChanged)) return null;
+        if (transactions.some((tr) => tr.getMeta(fixedResizeNormalizerKey))) return null;
+
+        let tr = newState.tr;
+        let changed = false;
+
+        newState.doc.descendants((node, pos) => {
+          if (node.type.name !== 'table') return true;
+
+          const targetTotal = getFixedTableTargetPx(node);
+          const currentWidths = targetTotal ? getFirstRowColwidths(node) : null;
+          if (!targetTotal || !currentWidths) return true;
+
+          const previousTable = oldState.doc.nodeAt(pos);
+          const previousWidths =
+            previousTable?.type.name === 'table' ? getFirstRowColwidths(previousTable) : null;
+          const normalized = normalizeFixedResizeWidths(previousWidths, currentWidths, targetTotal);
+          if (!normalized) return true;
+
+          tr = applyColumnWidthsToTable(tr, pos, normalized);
+          changed = true;
+          return false;
+        });
+
+        return changed ? tr.setMeta(fixedResizeNormalizerKey, true) : null;
+      },
+    });
+
     function createTable(
       rows: number,
       cols: number,
       borderColor: string = '000000',
-      contentWidthTwips: number = 9360
+      tableWidth: number = 5000,
+      widthType: 'pct' | 'dxa' = 'pct'
     ): PMNode {
       const tableRows: PMNode[] = [];
-      const colWidthTwips = Math.floor(contentWidthTwips / cols);
+      const colWidth = widthType === 'pct' ? Math.floor(100 / cols) : Math.floor(tableWidth / cols);
       const defaultRowHeightTwips = 360; // 0.25in ≈ 24px at 96 DPI
       const defaultRowHeightRule = 'atLeast';
 
@@ -846,8 +1095,8 @@ export const TablePluginExtension = createExtension({
             colspan: 1,
             rowspan: 1,
             borders: defaultBorders,
-            width: colWidthTwips,
-            widthType: 'dxa',
+            width: colWidth,
+            widthType,
           };
           cells.push(schema.nodes.tableCell.create(cellAttrs, paragraph));
         }
@@ -859,12 +1108,12 @@ export const TablePluginExtension = createExtension({
         );
       }
 
-      const columnWidths = Array(cols).fill(colWidthTwips);
+      const columnWidths = widthType === 'dxa' ? Array(cols).fill(colWidth) : undefined;
       return schema.nodes.table.create(
         {
           columnWidths,
-          width: contentWidthTwips,
-          widthType: 'dxa',
+          width: tableWidth,
+          widthType,
         },
         tableRows
       );
@@ -884,33 +1133,48 @@ export const TablePluginExtension = createExtension({
         }
 
         let insertPos = $from.pos;
+        let replaceEmptyParagraphFrom: number | null = null;
+        let replaceEmptyParagraphTo: number | null = null;
 
         // Find the right insertion point: after the current block-level node.
         // When inside a table cell, we insert within the cell (enabling nested tables)
         // rather than after the parent table.
         for (let d = $from.depth; d > 0; d--) {
           const node = $from.node(d);
-          if (node.type.name === 'paragraph' || node.type.name === 'table') {
+          if (node.type.name === 'paragraph') {
+            if (node.content.size === 0) {
+              replaceEmptyParagraphFrom = $from.before(d);
+              replaceEmptyParagraphTo = $from.after(d);
+              insertPos = replaceEmptyParagraphFrom;
+            } else {
+              insertPos = $from.after(d);
+            }
+            break;
+          }
+          if (node.type.name === 'table') {
             insertPos = $from.after(d);
             break;
           }
         }
 
         if (dispatch) {
-          // When inserting inside a table cell, size the new table to fit the cell
-          let contentWidthTwips = 9360; // default: full page width
+          // Top-level tables use percentage width so they fit body/header/footer
+          // content. Nested tables use a concrete width derived from the parent cell.
+          let tableWidth = 5000;
+          let widthType: 'pct' | 'dxa' = 'pct';
           for (let d = $from.depth; d > 0; d--) {
             const node = $from.node(d);
             if (node.type.name === 'tableCell' || node.type.name === 'tableHeader') {
               const cellWidth = node.attrs.width as number | undefined;
-              if (cellWidth && cellWidth > 0) {
+              if (node.attrs.widthType === 'dxa' && cellWidth && cellWidth > 0) {
                 // Subtract cell padding (~216 twips = 108 left + 108 right)
-                contentWidthTwips = Math.max(cellWidth - 216, 360);
+                tableWidth = Math.max(cellWidth - 216, 360);
+                widthType = 'dxa';
               }
               break;
             }
           }
-          const table = createTable(rows, cols, borderColor, contentWidthTwips);
+          const table = createTable(rows, cols, borderColor, tableWidth, widthType);
           const emptyParagraph = schema.nodes.paragraph.create();
 
           const $insert = state.doc.resolve(insertPos);
@@ -919,15 +1183,17 @@ export const TablePluginExtension = createExtension({
             ? [emptyParagraph, table, emptyParagraph]
             : [table, emptyParagraph];
 
-          const tr = state.tr.insert(insertPos, insertContent);
+          const tr =
+            replaceEmptyParagraphFrom != null && replaceEmptyParagraphTo != null
+              ? state.tr.replaceWith(replaceEmptyParagraphFrom, replaceEmptyParagraphTo, insertContent)
+              : state.tr.insert(insertPos, insertContent);
 
-          let tableStartPos = insertPos + 1;
+          let tableStartPos = insertPos;
           if (needsLeadingParagraph) {
             tableStartPos += emptyParagraph.nodeSize;
           }
 
-          const firstCellPos = tableStartPos + 1;
-          const firstCellContentPos = firstCellPos + 1;
+          const firstCellContentPos = tableStartPos + 4;
           tr.setSelection(TextSelection.create(tr.doc, firstCellContentPos));
           dispatch(tr.scrollIntoView());
         }
@@ -1098,29 +1364,12 @@ export const TablePluginExtension = createExtension({
 
         const updatedTable = tr.doc.nodeAt(context.tablePos);
         if (updatedTable && updatedTable.type.name === 'table') {
-          const firstRow = updatedTable.child(0);
-          if (firstRow && firstRow.type.name === 'tableRow') {
-            let cellPos = context.tablePos + 2;
-            firstRow.forEach((cell) => {
-              if (cell.type.name === 'tableCell' || cell.type.name === 'tableHeader') {
-                tr = tr.setNodeMarkup(cellPos, undefined, {
-                  ...cell.attrs,
-                  width: newColWidthPercent,
-                  widthType: 'pct',
-                });
-              }
-              cellPos += cell.nodeSize;
-            });
+          const colCount = getLogicalColumnCount(updatedTable) || newColumnCount;
+          tr = applyEqualFixedColumnGrid(tr, context.tablePos, updatedTable, colCount);
+          const normalizedTable = tr.doc.nodeAt(context.tablePos);
+          if (normalizedTable && normalizedTable.type.name === 'table') {
+            tr = clearNonFixedColumnGrid(tr, context.tablePos, normalizedTable);
           }
-
-          // Update table columnWidths so full-width tables resize correctly.
-          const colCount = firstRow?.childCount ?? newColumnCount;
-          const tableWidthTwips = (updatedTable.attrs.width as number) || 9360;
-          const colWidthTwips = Math.floor(tableWidthTwips / Math.max(1, colCount));
-          tr = tr.setNodeMarkup(context.tablePos, undefined, {
-            ...updatedTable.attrs,
-            columnWidths: Array(colCount).fill(colWidthTwips),
-          });
         }
 
         dispatch(tr.scrollIntoView());
@@ -1191,29 +1440,12 @@ export const TablePluginExtension = createExtension({
 
         const updatedTable = tr.doc.nodeAt(context.tablePos);
         if (updatedTable && updatedTable.type.name === 'table') {
-          const firstRow = updatedTable.child(0);
-          if (firstRow && firstRow.type.name === 'tableRow') {
-            let cellPos = context.tablePos + 2;
-            firstRow.forEach((cell) => {
-              if (cell.type.name === 'tableCell' || cell.type.name === 'tableHeader') {
-                tr = tr.setNodeMarkup(cellPos, undefined, {
-                  ...cell.attrs,
-                  width: newColWidthPercent,
-                  widthType: 'pct',
-                });
-              }
-              cellPos += cell.nodeSize;
-            });
+          const colCount = getLogicalColumnCount(updatedTable) || newColumnCount;
+          tr = applyEqualFixedColumnGrid(tr, context.tablePos, updatedTable, colCount);
+          const normalizedTable = tr.doc.nodeAt(context.tablePos);
+          if (normalizedTable && normalizedTable.type.name === 'table') {
+            tr = clearNonFixedColumnGrid(tr, context.tablePos, normalizedTable);
           }
-
-          // Update table columnWidths so full-width tables resize correctly.
-          const colCount = firstRow?.childCount ?? newColumnCount;
-          const tableWidthTwips = (updatedTable.attrs.width as number) || 9360;
-          const colWidthTwips = Math.floor(tableWidthTwips / Math.max(1, colCount));
-          tr = tr.setNodeMarkup(context.tablePos, undefined, {
-            ...updatedTable.attrs,
-            columnWidths: Array(colCount).fill(colWidthTwips),
-          });
         }
 
         dispatch(tr.scrollIntoView());
@@ -1235,7 +1467,6 @@ export const TablePluginExtension = createExtension({
       if (dispatch) {
         let tr = state.tr;
         const newColumnCount = (context.columnCount || 2) - 1;
-        const newColWidthPercent = Math.floor(100 / newColumnCount);
 
         const deleteOps: { start: number; end: number }[] = [];
         let rowPos = context.tablePos + 1;
@@ -1267,29 +1498,12 @@ export const TablePluginExtension = createExtension({
 
         const updatedTable = tr.doc.nodeAt(context.tablePos);
         if (updatedTable && updatedTable.type.name === 'table') {
-          const firstRow = updatedTable.child(0);
-          if (firstRow && firstRow.type.name === 'tableRow') {
-            let cellPos = context.tablePos + 2;
-            firstRow.forEach((cell) => {
-              if (cell.type.name === 'tableCell' || cell.type.name === 'tableHeader') {
-                tr = tr.setNodeMarkup(cellPos, undefined, {
-                  ...cell.attrs,
-                  width: newColWidthPercent,
-                  widthType: 'pct',
-                });
-              }
-              cellPos += cell.nodeSize;
-            });
+          const colCount = getLogicalColumnCount(updatedTable) || newColumnCount;
+          tr = applyEqualFixedColumnGrid(tr, context.tablePos, updatedTable, colCount);
+          const normalizedTable = tr.doc.nodeAt(context.tablePos);
+          if (normalizedTable && normalizedTable.type.name === 'table') {
+            tr = clearNonFixedColumnGrid(tr, context.tablePos, normalizedTable);
           }
-
-          // Update table columnWidths to match new column count.
-          const colCount = firstRow?.childCount ?? newColumnCount;
-          const tableWidthTwips = (updatedTable.attrs.width as number) || 9360;
-          const colWidthTwips = Math.floor(tableWidthTwips / Math.max(1, colCount));
-          tr = tr.setNodeMarkup(context.tablePos, undefined, {
-            ...updatedTable.attrs,
-            columnWidths: Array(colCount).fill(colWidthTwips),
-          });
         }
 
         dispatch(tr.scrollIntoView());
@@ -2328,9 +2542,18 @@ export const TablePluginExtension = createExtension({
       key: activeCellKey,
       props: {
         decorations(state) {
+          const resizeState = columnResizingPluginKey.getState(state);
+          if ((resizeState?.activeHandle ?? -1) > -1) return DecorationSet.empty;
+
           const { selection } = state;
-          // Skip if already a CellSelection (prosemirror-tables handles that)
-          if (selection instanceof CellSelection) return DecorationSet.empty;
+          // Skip cell selections even if the app resolves prosemirror-tables
+          // through another package boundary; the table plugin owns that UI.
+          if (
+            selection instanceof CellSelection ||
+            typeof (selection as { forEachCell?: unknown }).forEachCell === 'function'
+          ) {
+            return DecorationSet.empty;
+          }
 
           const { $from } = selection;
           for (let d = $from.depth; d > 0; d--) {
@@ -2355,6 +2578,7 @@ export const TablePluginExtension = createExtension({
           lastColumnResizable: true,
         }),
         tableEditing(),
+        fixedResizeNormalizerPlugin,
         activeCellPlugin,
       ],
       keyboardShortcuts: {

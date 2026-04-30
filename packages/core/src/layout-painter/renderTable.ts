@@ -65,6 +65,22 @@ interface CellFloatingImage {
   pmEnd?: number;
 }
 
+function isImageOnlyParagraph(block: ParagraphBlock): boolean {
+  let hasImage = false;
+
+  for (const run of block.runs) {
+    if (run.kind === 'image') {
+      hasImage = true;
+      continue;
+    }
+    if (run.kind === 'lineBreak') continue;
+    if (run.kind === 'text' && run.text.trim() === '') continue;
+    return false;
+  }
+
+  return hasImage;
+}
+
 /**
  * Extract floating images from cell paragraphs and compute their positions
  * relative to the cell content area.
@@ -308,6 +324,14 @@ function renderCellContent(
       );
 
       fragEl.style.position = 'relative';
+      if (
+        (context.section === 'header' || context.section === 'footer') &&
+        isImageOnlyParagraph(paragraphBlock)
+      ) {
+        for (const img of Array.from(fragEl.querySelectorAll<HTMLImageElement>('img.layout-run-image'))) {
+          img.style.display = 'block';
+        }
+      }
       contentEl.appendChild(fragEl);
       cumulativeY += paragraphMeasure.totalHeight;
     } else if (block?.kind === 'table' && measure?.kind === 'table') {

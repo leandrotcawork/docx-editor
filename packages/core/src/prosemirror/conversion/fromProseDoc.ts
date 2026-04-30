@@ -52,6 +52,7 @@ import type {
   TableCellAttrs,
 } from '../schema/nodes';
 import type { TextColorAttrs, UnderlineAttrs, FontFamilyAttrs } from '../schema/marks';
+import { pixelsToTwips } from '../../utils/units';
 
 /**
  * Convert a ProseMirror document to our Document type
@@ -1146,6 +1147,7 @@ interface PMTableCellAnchor {
   col: number;
   rowspan: number;
   colspan: number;
+  colwidth?: number[] | null;
   cell: TableCell;
 }
 
@@ -1177,6 +1179,7 @@ function collectPMTableAnchors(
         col: colIndex,
         rowspan,
         colspan,
+        colwidth: (cellNode.attrs as TableCellAttrs).colwidth,
         cell: convertPMTableCell(cellNode, documentCounts),
       });
 
@@ -1196,9 +1199,88 @@ function collectPMTableAnchors(
   return { anchors, totalCols };
 }
 
+function deriveColumnWidthsFromColwidths(
+  anchors: PMTableCellAnchor[],
+  totalCols: number,
+  fallback?: number[]
+): number[] | undefined {
+  const columnWidths: Array<number | undefined> = new Array(totalCols).fill(undefined);
+  const validFallback = isCompleteNumericWidths(fallback, totalCols) ? fallback : undefined;
+
+  for (const anchor of anchors) {
+    const colwidth = anchor.colwidth;
+    if (!Array.isArray(colwidth) || colwidth.length !== anchor.colspan) continue;
+
+    for (let offset = 0; offset < anchor.colspan; offset++) {
+      const col = anchor.col + offset;
+      const widthPx = colwidth[offset];
+      if (columnWidths[col] == null && typeof widthPx === 'number' && Number.isFinite(widthPx)) {
+        columnWidths[col] = Math.round(pixelsToTwips(widthPx));
+      }
+    }
+  }
+
+  if (!columnWidths.some((width) => width != null)) {
+    return deriveColumnWidthsFromCellWidths(anchors, totalCols) ?? validFallback;
+  }
+
+  const resolved = columnWidths.map((width, index) => width ?? validFallback?.[index]);
+  if (resolved.some((width) => width == null)) {
+    return deriveColumnWidthsFromCellWidths(anchors, totalCols) ?? validFallback;
+  }
+  if (validFallback && widthsAreEquivalent(resolved as number[], validFallback)) {
+    return validFallback;
+  }
+  return resolved as number[];
+}
+
+function widthsAreEquivalent(actual: number[], expected: number[]): boolean {
+  return (
+    actual.length === expected.length &&
+    actual.every((width, index) => Math.abs(width - expected[index]) <= 8)
+  );
+}
+
+function isCompleteNumericWidths(
+  widths: ReadonlyArray<number | undefined> | undefined,
+  totalCols: number
+): widths is number[] {
+  return (
+    Array.isArray(widths) &&
+    widths.length === totalCols &&
+    widths.every((width) => typeof width === 'number' && Number.isFinite(width) && width > 0)
+  );
+}
+
+function deriveColumnWidthsFromCellWidths(
+  anchors: PMTableCellAnchor[],
+  totalCols: number
+): number[] | undefined {
+  const firstRow = anchors.filter((anchor) => anchor.row === 0);
+  const columnWidths: Array<number | undefined> = new Array(totalCols).fill(undefined);
+
+  for (const anchor of firstRow) {
+    if (anchor.colspan !== 1) continue;
+
+    const width = anchor.cell.formatting?.width;
+    if (width?.type !== 'dxa' || typeof width.value !== 'number' || !Number.isFinite(width.value)) {
+      continue;
+    }
+
+    columnWidths[anchor.col] = width.value;
+  }
+
+  return isCompleteNumericWidths(columnWidths, totalCols) ? columnWidths : undefined;
+}
+
 function convertPMTable(node: PMNode, documentCounts?: TrackedChangeCounts): Table {
   const attrs = node.attrs as TableAttrs;
   const { anchors, totalCols } = collectPMTableAnchors(node, documentCounts);
+  const columnWidths = deriveColumnWidthsFromColwidths(
+    anchors,
+    totalCols,
+    attrs.columnWidths || undefined
+  );
   const anchorByStart = new Map<string, PMTableCellAnchor>();
   const anchorByCoveredSlot = new Map<string, PMTableCellAnchor>();
 
@@ -1229,6 +1311,14 @@ function convertPMTable(node: PMNode, documentCounts?: TrackedChangeCounts): Tab
           formatting.vMerge = 'restart';
         } else {
           delete formatting.vMerge;
+        }
+        if (formatting.width?.type === 'dxa' && columnWidths) {
+          formatting.width = {
+            value: columnWidths
+              .slice(anchor.col, anchor.col + anchor.colspan)
+              .reduce((sum, width) => sum + width, 0),
+            type: 'dxa',
+          };
         }
         cells.push({
           ...anchor.cell,
@@ -1278,7 +1368,7 @@ function convertPMTable(node: PMNode, documentCounts?: TrackedChangeCounts): Tab
         // so borders persist on round-trip.
         return {
           type: 'table',
-          columnWidths: attrs.columnWidths || undefined,
+          columnWidths,
           formatting: { borders: inferredBorders },
           rows,
         };
@@ -1288,7 +1378,7 @@ function convertPMTable(node: PMNode, documentCounts?: TrackedChangeCounts): Tab
 
   return {
     type: 'table',
-    columnWidths: attrs.columnWidths || undefined,
+    columnWidths,
     formatting,
     rows,
   };
@@ -1484,6 +1574,8 @@ function convertPMTableCell(node: PMNode, documentCounts?: TrackedChangeCounts):
  * Borders are stored as full BorderSpec objects — no conversion needed.
  */
 function tableCellAttrsToFormatting(attrs: TableCellAttrs): TableCellFormatting | undefined {
+  const width = tableCellWidthFromAttrs(attrs);
+
   // If we have the original formatting from the DOCX, use it as a base
   // for lossless round-trip. This preserves properties like vMerge, fitText,
   // hideMark, conditionalFormat that aren't tracked as PM attrs.
@@ -1495,12 +1587,8 @@ function tableCellAttrsToFormatting(attrs: TableCellAttrs): TableCellFormatting 
     if (attrs.colspan > 1) {
       result.gridSpan = attrs.colspan;
     }
-    // Width: use != null to handle width=0 correctly
-    if (attrs.width != null) {
-      result.width = {
-        value: attrs.width,
-        type: (attrs.widthType as 'auto' | 'dxa' | 'pct' | 'nil') || 'dxa',
-      };
+    if (width) {
+      result.width = width;
     }
     if (attrs.verticalAlign !== (orig.verticalAlign || undefined)) {
       result.verticalAlign = attrs.verticalAlign || undefined;
@@ -1542,7 +1630,7 @@ function tableCellAttrsToFormatting(attrs: TableCellAttrs): TableCellFormatting 
   const hasFormatting =
     attrs.colspan > 1 ||
     attrs.rowspan > 1 ||
-    attrs.width != null ||
+    width != null ||
     attrs.verticalAlign ||
     attrs.backgroundColor ||
     attrs.borders ||
@@ -1566,13 +1654,7 @@ function tableCellAttrsToFormatting(attrs: TableCellAttrs): TableCellFormatting 
 
   return {
     gridSpan: attrs.colspan > 1 ? attrs.colspan : undefined,
-    width:
-      attrs.width != null
-        ? {
-            value: attrs.width,
-            type: (attrs.widthType as 'auto' | 'dxa' | 'pct' | 'nil') || 'dxa',
-          }
-        : undefined,
+    width,
     verticalAlign: attrs.verticalAlign || undefined,
     textDirection: (attrs.textDirection as TableCellFormatting['textDirection']) || undefined,
     shading: attrs.backgroundColor
@@ -1583,6 +1665,38 @@ function tableCellAttrsToFormatting(attrs: TableCellAttrs): TableCellFormatting 
     borders: attrs.borders as TableCellFormatting['borders'],
     margins,
   };
+}
+
+function tableCellWidthFromAttrs(attrs: TableCellAttrs): TableCellFormatting['width'] | undefined {
+  if (
+    attrs.widthType === 'dxa' &&
+    Array.isArray(attrs.colwidth) &&
+    attrs.colwidth.length > 0 &&
+    attrs.colwidth.every((width) => typeof width === 'number' && Number.isFinite(width) && width > 0)
+  ) {
+    const colwidthValue = Math.round(pixelsToTwips(attrs.colwidth.reduce((sum, width) => sum + width, 0)));
+    if (attrs.width != null && Math.abs(colwidthValue - attrs.width) <= 8) {
+      return {
+        value: attrs.width,
+        type: 'dxa',
+      };
+    }
+
+    return {
+      value: colwidthValue,
+      type: 'dxa',
+    };
+  }
+
+  // Width: use != null to handle width=0 correctly.
+  if (attrs.width != null) {
+    return {
+      value: attrs.width,
+      type: (attrs.widthType as 'auto' | 'dxa' | 'pct' | 'nil') || 'dxa',
+    };
+  }
+
+  return undefined;
 }
 
 // ============================================================================

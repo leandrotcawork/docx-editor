@@ -7,7 +7,14 @@
  */
 
 import type { Paragraph, Table, HeaderFooter, HeaderFooterType, Run } from '../types/document';
-import type { FlowBlock, Measure, ParagraphBlock, ParagraphMeasure } from '../layout-engine/types';
+import type {
+  FlowBlock,
+  Measure,
+  ParagraphBlock,
+  ParagraphMeasure,
+  TableBlock,
+  TableMeasure,
+} from '../layout-engine/types';
 import { measureParagraph, twipsToPx } from './measuring';
 
 // =============================================================================
@@ -60,19 +67,16 @@ export interface MeasureHeaderFooterOptions {
  * Creates a temporary ProseMirror-like structure from the content
  * and converts it to flow blocks.
  */
-function contentToFlowBlocks(content: (Paragraph | Table)[]): FlowBlock[] {
-  // Create a minimal PM doc-like structure
-  // The toFlowBlocks function expects a PM Node, but we can create
-  // blocks directly from our Document types
-
+function contentToFlowBlocks(content: (Paragraph | Table)[], availableWidth: number): FlowBlock[] {
   const blocks: FlowBlock[] = [];
 
-  for (const item of content) {
+  content.forEach((item, index) => {
     if (item.type === 'paragraph') {
       blocks.push(paragraphToFlowBlock(item));
+    } else if (item.type === 'table') {
+      blocks.push(tableToFlowBlock(item, `hf-table-${index}`, availableWidth));
     }
-    // Tables in headers/footers are rare, skip for now
-  }
+  });
 
   return blocks;
 }
@@ -224,6 +228,66 @@ function paragraphToFlowBlock(para: Paragraph): ParagraphBlock {
   return block;
 }
 
+function measurementToPx(
+  measurement: { value: number; type: string } | undefined,
+  availableWidth: number
+): number | undefined {
+  if (!measurement) return undefined;
+  if (measurement.type === 'dxa') return twipsToPx(measurement.value);
+  if (measurement.type === 'pct') return availableWidth * (measurement.value / 5000);
+  return undefined;
+}
+
+function cellPadding(
+  cell: Table['rows'][number]['cells'][number],
+  table: Table,
+  availableWidth: number
+): { top: number; right: number; bottom: number; left: number } {
+  const margins = cell.formatting?.margins ?? table.formatting?.cellMargins;
+
+  return {
+    top: measurementToPx(margins?.top, availableWidth) ?? 0,
+    right: measurementToPx(margins?.right, availableWidth) ?? 7,
+    bottom: measurementToPx(margins?.bottom, availableWidth) ?? 0,
+    left: measurementToPx(margins?.left, availableWidth) ?? 7,
+  };
+}
+
+function tableToFlowBlock(table: Table, id: string, availableWidth: number): TableBlock {
+  const rows = table.rows.map((row, rowIndex) => ({
+    id: `${id}-row-${rowIndex}`,
+    height: row.formatting?.height ? twipsToPx(row.formatting.height.value) : undefined,
+    heightRule: row.formatting?.heightRule,
+    isHeader: row.formatting?.header,
+    cells: row.cells.map((cell, cellIndex) => {
+      const width = measurementToPx(cell.formatting?.width, availableWidth);
+      const padding = cellPadding(cell, table, availableWidth);
+      const nestedContentWidth =
+        width !== undefined ? Math.max(0, width - padding.left - padding.right) : availableWidth;
+
+      return {
+        id: `${id}-row-${rowIndex}-cell-${cellIndex}`,
+        blocks: contentToFlowBlocks(cell.content, nestedContentWidth),
+        colSpan: cell.formatting?.gridSpan,
+        width,
+        verticalAlign: cell.formatting?.verticalAlign,
+        padding,
+      };
+    }),
+  }));
+
+  return {
+    kind: 'table',
+    id,
+    rows,
+    columnWidths: table.columnWidths?.map(twipsToPx),
+    width: table.formatting?.width?.value,
+    widthType: table.formatting?.width?.type,
+    justification: table.formatting?.justification,
+    indent: table.formatting?.indent ? twipsToPx(table.formatting.indent.value) : undefined,
+  };
+}
+
 /**
  * Measure a single block.
  */
@@ -232,11 +296,70 @@ function measureBlock(block: FlowBlock, maxWidth: number): Measure {
     return measureParagraph(block as ParagraphBlock, maxWidth);
   }
 
-  // For other block types, return minimal measure
+  if (block.kind === 'table') {
+    return measureTable(block as TableBlock, maxWidth);
+  }
+
+  return { kind: 'paragraph', lines: [], totalHeight: 0 };
+}
+
+function resolveColumnWidths(table: TableBlock, maxWidth: number): number[] {
+  if (table.columnWidths && table.columnWidths.length > 0) {
+    return table.columnWidths;
+  }
+
+  const columnCount = Math.max(...table.rows.map((row) => row.cells.length), 1);
+  return Array.from({ length: columnCount }, () => maxWidth / columnCount);
+}
+
+function measureTable(table: TableBlock, maxWidth: number): TableMeasure {
+  const columnWidths = resolveColumnWidths(table, maxWidth);
+  const rows = table.rows.map((row) => {
+    let columnIndex = 0;
+    const cells = row.cells.map((cell) => {
+      const colSpan = cell.colSpan ?? 1;
+      const width =
+        cell.width ??
+        columnWidths
+          .slice(columnIndex, columnIndex + colSpan)
+          .reduce((sum, columnWidth) => sum + columnWidth, 0);
+      const padding = cell.padding ?? { top: 0, right: 7, bottom: 0, left: 7 };
+      const contentWidth = Math.max(0, width - padding.left - padding.right);
+      const blockMeasures = cell.blocks.map((block) => measureBlock(block, contentWidth));
+      const contentHeight = blockMeasures.reduce((sum, measure) => {
+        if ('totalHeight' in measure) return sum + (measure.totalHeight ?? 0);
+        return sum;
+      }, 0);
+      const height = contentHeight + padding.top + padding.bottom;
+
+      columnIndex += colSpan;
+
+      return {
+        blocks: blockMeasures,
+        width,
+        height,
+        colSpan,
+        rowSpan: cell.rowSpan,
+      };
+    });
+    const measuredHeight = Math.max(...cells.map((cell) => cell.height), 0);
+    const rowHeight =
+      row.heightRule === 'exact'
+        ? row.height ?? measuredHeight
+        : Math.max(row.height ?? 0, measuredHeight);
+
+    return {
+      cells: cells.map((cell) => ({ ...cell, height: rowHeight })),
+      height: rowHeight,
+    };
+  });
+
   return {
-    kind: 'paragraph',
-    lines: [],
-    totalHeight: 0,
+    kind: 'table',
+    rows,
+    columnWidths,
+    totalWidth: columnWidths.reduce((sum, width) => sum + width, 0),
+    totalHeight: rows.reduce((sum, row) => sum + row.height, 0),
   };
 }
 
@@ -245,8 +368,8 @@ function measureBlock(block: FlowBlock, maxWidth: number): Measure {
  */
 function calculateTotalHeight(measures: Measure[]): number {
   return measures.reduce((total, measure) => {
-    if (measure.kind === 'paragraph') {
-      return total + (measure as ParagraphMeasure).totalHeight;
+    if (measure.kind === 'paragraph' || measure.kind === 'table') {
+      return total + (measure as ParagraphMeasure | TableMeasure).totalHeight;
     }
     return total;
   }, 0);
@@ -270,7 +393,7 @@ export function measureHeaderFooter(
   const { maxWidth } = options;
 
   // Convert content to flow blocks
-  const blocks = contentToFlowBlocks(headerFooter.content);
+  const blocks = contentToFlowBlocks(headerFooter.content, maxWidth);
 
   // Measure all blocks
   const measures = blocks.map((block) => measureBlock(block, maxWidth));

@@ -47,6 +47,10 @@ import type { TableAttrs, TableRowAttrs, TableCellAttrs } from '../schema/nodes'
 import { resolveColorToHex } from '../../utils/colorResolver';
 import type { Theme } from '../../types/document';
 
+function twipsToPixels(twips: number): number {
+  return Math.round((twips / 1440) * 96);
+}
+
 /**
  * Options for document conversion
  */
@@ -694,15 +698,12 @@ function convertTableRow(
     const shouldSkip = rowSpanInfo?.skip ?? false;
     const calculatedRowSpan = rowSpanInfo?.rowSpan ?? 1;
 
-    // Calculate the width for this cell from columnWidths if cell doesn't have own width
+    // Calculate the width for this cell from tblGrid if cell doesn't have own width.
     let gridWidth: number | undefined;
+    let gridColumnWidths: number[] | undefined;
     if (columnWidths && totalWidth && totalWidth > 0) {
-      // Sum widths for all columns this cell spans
-      let cellWidthTwips = 0;
-      for (let i = 0; i < colspan && colIndex + i < columnWidths.length; i++) {
-        cellWidthTwips += columnWidths[colIndex + i];
-      }
-      // Convert to percentage of total table width
+      gridColumnWidths = columnWidths.slice(colIndex, colIndex + colspan);
+      const cellWidthTwips = gridColumnWidths.reduce((sum, width) => sum + width, 0);
       gridWidth = Math.round((cellWidthTwips / totalWidth) * 100);
     }
     colIndex += colspan;
@@ -833,6 +834,7 @@ function convertTableRow(
         styleResolver,
         isHeaderRow,
         gridWidth,
+        gridColumnWidths,
         cellConditionalStyle,
         tableBorders,
         isFirstRow,
@@ -857,6 +859,7 @@ function convertTableCell(
   styleResolver: StyleResolver | null,
   isHeader: boolean,
   gridWidthPercent?: number,
+  gridColumnWidths?: number[],
   conditionalStyle?: { tcPr?: TableCellFormatting; rPr?: TextFormatting },
   tableBorders?: TableBorders,
   isFirstRow?: boolean,
@@ -881,6 +884,15 @@ function convertTableCell(
     width = gridWidthPercent;
     widthType = 'pct';
   }
+  const colspan = formatting?.gridSpan ?? 1;
+  const gridColwidth =
+    gridColumnWidths && gridColumnWidths.length === colspan
+      ? gridColumnWidths.map(twipsToPixels)
+      : undefined;
+  const explicitColwidth =
+    widthType === 'dxa' && typeof width === 'number' && colspan === 1
+      ? [twipsToPixels(width)]
+      : undefined;
 
   // Cell's own shading wins; fall back to the table style's conditional row/col shading.
   const backgroundColor = resolveColorToHex(
@@ -912,10 +924,11 @@ function convertTableCell(
       : undefined;
 
   const attrs: TableCellAttrs = {
-    colspan: formatting?.gridSpan ?? 1,
+    colspan,
     rowspan: rowspan,
     width: width,
     widthType: widthType,
+    colwidth: explicitColwidth ?? gridColwidth,
     verticalAlign: formatting?.verticalAlign,
     backgroundColor: backgroundColor,
     textDirection: formatting?.textDirection,

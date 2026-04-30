@@ -6,7 +6,7 @@
  */
 
 import { describe, test, expect } from 'bun:test';
-import { toProseDoc } from './toProseDoc';
+import { headerFooterToProseDoc, toProseDoc } from './toProseDoc';
 import { fromProseDoc } from './fromProseDoc';
 import type { Document, Table, TableRow, TableCell, Theme } from '../../types/document';
 
@@ -65,6 +65,71 @@ function collectCellAttrs(pmDoc: ReturnType<typeof toProseDoc>): Array<Record<st
   return cells;
 }
 
+function collectTableCellLikeAttrs(pmDoc: ReturnType<typeof toProseDoc>): Array<Record<string, unknown>> {
+  const cells: Array<Record<string, unknown>> = [];
+  pmDoc.descendants((node) => {
+    if (node.type.name === 'tableCell' || node.type.name === 'tableHeader') {
+      cells.push(node.attrs as Record<string, unknown>);
+    }
+  });
+  return cells;
+}
+
+
+describe('headerFooterToProseDoc - table sizing metadata', () => {
+  test('dxa cell widths initialize prosemirror-tables colwidth metadata', () => {
+    const table: Table = {
+      type: 'table',
+      formatting: {
+        width: { value: 9026, type: 'dxa' },
+      },
+      columnWidths: [4200, 4826],
+      rows: [
+        {
+          type: 'tableRow',
+          cells: [
+            makeCell({ width: { value: 4200, type: 'dxa' } }),
+            makeCell({ width: { value: 4826, type: 'dxa' } }),
+          ],
+        },
+      ],
+    };
+
+    const pmDoc = headerFooterToProseDoc([table]);
+    const cells = collectTableCellLikeAttrs(pmDoc);
+
+    expect(cells[0].width).toBe(4200);
+    expect(cells[0].widthType).toBe('dxa');
+    expect(cells[0].colwidth).toEqual([280]);
+    expect(cells[1].width).toBe(4826);
+    expect(cells[1].widthType).toBe('dxa');
+    expect(cells[1].colwidth).toEqual([322]);
+  });
+
+  test('tblGrid widths initialize prosemirror-tables colwidth metadata without cell widths', () => {
+    const table: Table = {
+      type: 'table',
+      formatting: {
+        width: { value: 9026, type: 'dxa' },
+      },
+      columnWidths: [4200, 4826],
+      rows: [
+        {
+          type: 'tableRow',
+          cells: [makeCell(), makeCell()],
+        },
+      ],
+    };
+
+    const pmDoc = headerFooterToProseDoc([table]);
+    const cells = collectTableCellLikeAttrs(pmDoc);
+
+    expect(cells[0].widthType).toBe('pct');
+    expect(cells[0].colwidth).toEqual([280]);
+    expect(cells[1].widthType).toBe('pct');
+    expect(cells[1].colwidth).toEqual([322]);
+  });
+});
 describe('toProseDoc — table cell theme color resolution', () => {
   test('cell with RGB fill sets backgroundColor directly', () => {
     const cell = makeCell({ shading: { fill: { rgb: 'FF0000' } } });
@@ -190,5 +255,285 @@ describe('toProseDoc ↔ fromProseDoc round-trip — theme shading preservation'
     const shading = firstCellShading(fromProseDoc(edited, inDoc));
     expect(shading?.fill?.rgb).toBe('FF00FF');
     expect(shading?.fill?.themeColor).toBeUndefined();
+  });
+});
+
+describe('toProseDoc ↔ fromProseDoc round-trip — table sizing metadata', () => {
+  function firstTable(doc: Document): Table {
+    return doc.package.document.content[0] as Table;
+  }
+
+  type JsonNode = { type?: string; attrs?: Record<string, unknown>; content?: JsonNode[] };
+
+  function resizeFirstRowColwidths(pmDoc: ReturnType<typeof toProseDoc>, colwidths: number[]) {
+    const json = pmDoc.toJSON() as JsonNode;
+    let cellIndex = 0;
+    const resize = (node: JsonNode) => {
+      if ((node.type === 'tableCell' || node.type === 'tableHeader') && node.attrs) {
+        node.attrs.colwidth = [colwidths[cellIndex++]];
+      }
+      node.content?.forEach(resize);
+    };
+    resize(json);
+    return pmDoc.type.schema.nodeFromJSON(json);
+  }
+
+  test('preserves tblGrid column widths and row height without edits', () => {
+    const table: Table = {
+      type: 'table',
+      columnWidths: [1800, 3600],
+      formatting: {
+        width: { value: 5400, type: 'dxa' },
+      },
+      rows: [
+        {
+          type: 'tableRow',
+          formatting: {
+            height: { value: 420, type: 'dxa' },
+            heightRule: 'atLeast',
+          },
+          cells: [makeCell(), makeCell()],
+        },
+      ],
+    };
+    const inDoc = makeDocument(table);
+
+    const outTable = firstTable(fromProseDoc(toProseDoc(inDoc), inDoc));
+
+    expect(outTable.columnWidths).toEqual([1800, 3600]);
+    expect(outTable.rows[0]?.formatting?.height).toEqual({ value: 420, type: 'dxa' });
+    expect(outTable.rows[0]?.formatting?.heightRule).toBe('atLeast');
+  });
+
+  test('preserves non-divisible tblGrid widths without edit-rounding drift', () => {
+    const table: Table = {
+      type: 'table',
+      columnWidths: [2806, 2892, 2806],
+      formatting: {
+        width: { value: 8504, type: 'dxa' },
+      },
+      rows: [
+        {
+          type: 'tableRow',
+          cells: [
+            makeCell({ width: { value: 2806, type: 'dxa' } }),
+            makeCell({ width: { value: 2892, type: 'dxa' } }),
+            makeCell({ width: { value: 2806, type: 'dxa' } }),
+          ],
+        },
+      ],
+    };
+    const inDoc = makeDocument(table);
+
+    const outTable = firstTable(fromProseDoc(toProseDoc(inDoc), inDoc));
+
+    expect(outTable.columnWidths).toEqual([2806, 2892, 2806]);
+    expect(outTable.rows[0]?.cells.map((cell) => cell.formatting?.width?.value)).toEqual([
+      2806,
+      2892,
+      2806,
+    ]);
+  });
+
+  test('preserves pct cell width semantics when tblGrid supplies editor colwidths', () => {
+    const table: Table = {
+      type: 'table',
+      columnWidths: [1800, 3600],
+      formatting: {
+        width: { value: 5000, type: 'pct' },
+      },
+      rows: [
+        {
+          type: 'tableRow',
+          cells: [
+            makeCell({ width: { value: 2500, type: 'pct' } }),
+            makeCell({ width: { value: 2500, type: 'pct' } }),
+          ],
+        },
+      ],
+    };
+    const inDoc = makeDocument(table);
+
+    const outTable = firstTable(fromProseDoc(toProseDoc(inDoc), inDoc));
+
+    expect(outTable.formatting?.width).toEqual({ value: 5000, type: 'pct' });
+    expect(outTable.columnWidths).toEqual([1800, 3600]);
+    expect(outTable.rows[0]?.cells.map((cell) => cell.formatting?.width)).toEqual([
+      { value: 2500, type: 'pct' },
+      { value: 2500, type: 'pct' },
+    ]);
+  });
+
+  test('uses edited ProseMirror colwidths as exported tblGrid widths', () => {
+    const table: Table = {
+      type: 'table',
+      columnWidths: [1800, 3600],
+      formatting: {
+        width: { value: 5400, type: 'dxa' },
+      },
+      rows: [
+        {
+          type: 'tableRow',
+          cells: [makeCell(), makeCell()],
+        },
+      ],
+    };
+    const inDoc = makeDocument(table);
+    const resizedPmDoc = resizeFirstRowColwidths(toProseDoc(inDoc), [150, 210]);
+
+    const outTable = firstTable(fromProseDoc(resizedPmDoc, inDoc));
+
+    expect(outTable.columnWidths).toEqual([2250, 3150]);
+  });
+
+  test('repairs partial table columnWidths from resized cell widths', () => {
+    const table: Table = {
+      type: 'table',
+      columnWidths: [2806, 2892, 2806],
+      formatting: {
+        width: { value: 8504, type: 'dxa' },
+      },
+      rows: [
+        {
+          type: 'tableRow',
+          cells: [makeCell(), makeCell(), makeCell()],
+        },
+        {
+          type: 'tableRow',
+          cells: [makeCell(), makeCell(), makeCell()],
+        },
+      ],
+    };
+    const inDoc = makeDocument(table);
+    const pmDoc = toProseDoc(inDoc);
+    const json = pmDoc.toJSON() as JsonNode;
+
+    const setWidths = (node: JsonNode) => {
+      if (node.type === 'table' && node.attrs) {
+        node.attrs.columnWidths = [null, null, 2805];
+      }
+
+      node.content?.forEach(setWidths);
+    };
+    setWidths(json);
+
+    let cellIndex = 0;
+    const resizedWidths = [3541, 2157, 2806, 3541, 2157, 2806];
+    const applyCellWidths = (node: JsonNode) => {
+      if ((node.type === 'tableCell' || node.type === 'tableHeader') && node.attrs) {
+        node.attrs.width = resizedWidths[cellIndex++];
+        node.attrs.widthType = 'dxa';
+        node.attrs.colwidth = null;
+      }
+      node.content?.forEach(applyCellWidths);
+    };
+    applyCellWidths(json);
+
+    const resizedPmDoc = pmDoc.type.schema.nodeFromJSON(json);
+    const outTable = firstTable(fromProseDoc(resizedPmDoc, inDoc));
+
+    expect(outTable.columnWidths).toEqual([3541, 2157, 2806]);
+  });
+
+  test('does not repair partial table columnWidths from a merged first row', () => {
+    const table: Table = {
+      type: 'table',
+      columnWidths: [2806, 2892, 2806],
+      formatting: {
+        width: { value: 8504, type: 'dxa' },
+      },
+      rows: [
+        {
+          type: 'tableRow',
+          cells: [
+            makeCell({ width: { value: 5698, type: 'dxa' }, gridSpan: 2 }),
+            makeCell({ width: { value: 2806, type: 'dxa' } }),
+          ],
+        },
+        {
+          type: 'tableRow',
+          cells: [
+            makeCell({ width: { value: 2806, type: 'dxa' } }),
+            makeCell({ width: { value: 2892, type: 'dxa' } }),
+            makeCell({ width: { value: 2806, type: 'dxa' } }),
+          ],
+        },
+      ],
+    };
+    const inDoc = makeDocument(table);
+    const pmDoc = toProseDoc(inDoc);
+    const json = pmDoc.toJSON() as JsonNode;
+
+    const setPartialTableWidths = (node: JsonNode) => {
+      if (node.type === 'table' && node.attrs) {
+        node.attrs.columnWidths = [null, null, 2805];
+      }
+
+      if ((node.type === 'tableCell' || node.type === 'tableHeader') && node.attrs) {
+        node.attrs.colwidth = null;
+      }
+
+      node.content?.forEach(setPartialTableWidths);
+    };
+    setPartialTableWidths(json);
+
+    const resizedPmDoc = pmDoc.type.schema.nodeFromJSON(json);
+    const outTable = firstTable(fromProseDoc(resizedPmDoc, inDoc));
+
+    expect(outTable.columnWidths).toBeUndefined();
+  });
+
+  test('uses summed colwidth as exported width for resized merged cells', () => {
+    const table: Table = {
+      type: 'table',
+      columnWidths: [2806, 2892, 2806],
+      formatting: {
+        width: { value: 8504, type: 'dxa' },
+      },
+      rows: [
+        {
+          type: 'tableRow',
+          cells: [
+            makeCell({ width: { value: 5698, type: 'dxa' }, gridSpan: 2 }),
+            makeCell({ width: { value: 2806, type: 'dxa' } }),
+          ],
+        },
+        {
+          type: 'tableRow',
+          cells: [
+            makeCell({ width: { value: 2806, type: 'dxa' } }),
+            makeCell({ width: { value: 2892, type: 'dxa' } }),
+            makeCell({ width: { value: 2806, type: 'dxa' } }),
+          ],
+        },
+      ],
+    };
+    const inDoc = makeDocument(table);
+    const pmDoc = toProseDoc(inDoc);
+    const json = pmDoc.toJSON() as JsonNode;
+
+    const resizedColwidths = [
+      [238, 142],
+      [187],
+      [238],
+      [142],
+      [187],
+    ];
+    let cellIndex = 0;
+    const resizeCells = (node: JsonNode) => {
+      if ((node.type === 'tableCell' || node.type === 'tableHeader') && node.attrs) {
+        node.attrs.colwidth = resizedColwidths[cellIndex++] ?? node.attrs.colwidth;
+      }
+
+      node.content?.forEach(resizeCells);
+    };
+    resizeCells(json);
+
+    const resizedPmDoc = pmDoc.type.schema.nodeFromJSON(json);
+    const outTable = firstTable(fromProseDoc(resizedPmDoc, inDoc));
+
+    expect(outTable.columnWidths).toEqual([3570, 2130, 2805]);
+    expect(outTable.rows[0]?.cells[0]?.formatting?.gridSpan).toBe(2);
+    expect(outTable.rows[0]?.cells[0]?.formatting?.width).toEqual({ value: 5700, type: 'dxa' });
   });
 });

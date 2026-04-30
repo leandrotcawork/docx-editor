@@ -218,9 +218,11 @@ export function createPaginator(options: PaginatorOptions) {
     // Ensure we have space
     const state = ensureFits(totalHeight);
 
-    // If we moved to a new page/column, no space before needed
-    const isAtTop = state.cursorY === state.topMargin;
-    const actualSpaceBefore = isAtTop ? 0 : effectiveSpaceBefore;
+    // Preserve authored spacing for the document's first content, but suppress
+    // leading spacing at later page/column tops like Word's page layout.
+    const isAtTop = state.cursorY === columnRegionTop;
+    const isFirstPageTop = state.page.number === 1 && state.columnIndex === 0 && state.page.fragments.length === 0;
+    const actualSpaceBefore = isAtTop && !isFirstPageTop ? 0 : effectiveSpaceBefore;
 
     // Calculate position
     const x = getColumnX(state.columnIndex);

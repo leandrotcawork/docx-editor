@@ -398,6 +398,7 @@ function paragraphToRuns(node: PMNode, startPos: number, _options: ToFlowBlocksO
       runs.push(run);
     } else if (child.type.name === 'field') {
       // Field node — convert to FieldRun for render-time substitution
+      const formatting = extractRunFormatting(child.marks, theme);
       const ft = child.attrs.fieldType as string;
       const mappedType: FieldRun['fieldType'] =
         ft === 'PAGE'
@@ -413,6 +414,7 @@ function paragraphToRuns(node: PMNode, startPos: number, _options: ToFlowBlocksO
         kind: 'field',
         fieldType: mappedType,
         fallback: (child.attrs.displayText as string) || '',
+        ...formatting,
         pmStart: childPos,
         pmEnd: childPos + child.nodeSize,
       };

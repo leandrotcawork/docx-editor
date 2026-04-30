@@ -59,6 +59,32 @@ function getSpacingAfter(block: ParagraphBlock): number {
   return block.attrs?.spacing?.after ?? 0;
 }
 
+function nextBlockForcesBreak(blocks: FlowBlock[], index: number): boolean {
+  if (index + 1 >= blocks.length) return false;
+  const next = blocks[index + 1];
+  if (next.kind === 'pageBreak') return true;
+  if (next.kind === 'sectionBreak') {
+    const type = (next as SectionBreakBlock).type ?? 'nextPage';
+    return type !== 'continuous';
+  }
+  return hasPageBreakBefore(next);
+}
+
+function borderExtent(border: { space?: number; width?: number } | undefined): number {
+  if (!border) return 0;
+  return (border.space ?? 0) + (border.width ?? 0);
+}
+
+function paragraphBorderHeight(
+  block: ParagraphBlock,
+  isFirstFragment: boolean,
+  isLastFragment: boolean
+): number {
+  const borders = block.attrs?.borders;
+  if (!borders) return 0;
+  return (isFirstFragment ? borderExtent(borders.top) : 0) + (isLastFragment ? borderExtent(borders.bottom) : 0);
+}
+
 /**
  * Apply contextual spacing suppression (OOXML §17.3.1.9).
  *
@@ -220,7 +246,13 @@ export function layoutDocument(
 
     switch (block.kind) {
       case 'paragraph':
-        layoutParagraph(block, measure as ParagraphMeasure, paginator, contentWidth);
+        layoutParagraph(
+          block,
+          measure as ParagraphMeasure,
+          paginator,
+          contentWidth,
+          nextBlockForcesBreak(blocks, i)
+        );
         break;
 
       case 'table':
@@ -283,7 +315,8 @@ function layoutParagraph(
   block: ParagraphBlock,
   measure: ParagraphMeasure,
   paginator: ReturnType<typeof createPaginator>,
-  contentWidth: number
+  contentWidth: number,
+  nextForcesBreak: boolean
 ): void {
   if (measure.kind !== 'paragraph') {
     throw new Error(`layoutParagraph: expected paragraph measure`);
@@ -294,6 +327,7 @@ function layoutParagraph(
     // Empty paragraph - still takes up space based on spacing
     const spaceBefore = getSpacingBefore(block);
     const spaceAfter = getSpacingAfter(block);
+    const fragmentHeight = paragraphBorderHeight(block, true, true);
     const state = paginator.getCurrentState();
 
     // Create minimal fragment
@@ -303,14 +337,14 @@ function layoutParagraph(
       x: paginator.getColumnX(state.columnIndex),
       y: state.cursorY + spaceBefore,
       width: contentWidth,
-      height: 0,
+      height: fragmentHeight,
       fromLine: 0,
       toLine: 0,
       pmStart: block.pmStart,
       pmEnd: block.pmEnd,
     };
 
-    paginator.addFragment(fragment, 0, spaceBefore, spaceAfter);
+    paginator.addFragment(fragment, fragmentHeight, spaceBefore, spaceAfter);
     return;
   }
 
@@ -331,12 +365,19 @@ function layoutParagraph(
     for (let j = currentLineIndex; j < lines.length; j++) {
       const lineHeight = lines[j].lineHeight;
       const totalWithLine = linesHeight + lineHeight;
+      const candidateIsFirstFragment = currentLineIndex === 0;
+      const candidateIsLastFragment = j + 1 >= lines.length;
+      const candidateBorderHeight = paragraphBorderHeight(
+        block,
+        candidateIsFirstFragment,
+        candidateIsLastFragment
+      );
 
       // Add space before only for first fragment
       const withSpacing =
         currentLineIndex === 0 && j === currentLineIndex
-          ? totalWithLine + spaceBefore
-          : totalWithLine;
+          ? totalWithLine + candidateBorderHeight + spaceBefore
+          : totalWithLine + candidateBorderHeight;
 
       if (withSpacing <= availableHeight || fittingLines === 0) {
         linesHeight = totalWithLine;
@@ -351,6 +392,8 @@ function layoutParagraph(
     const isLastFragment = currentLineIndex + fittingLines >= lines.length;
     const effectiveSpaceBefore = isFirstFragment ? spaceBefore : 0;
     const effectiveSpaceAfter = isLastFragment ? spaceAfter : 0;
+    const borderHeight = paragraphBorderHeight(block, isFirstFragment, isLastFragment);
+    const fragmentHeight = linesHeight + borderHeight;
 
     const fragment: ParagraphFragment = {
       kind: 'paragraph',
@@ -358,7 +401,7 @@ function layoutParagraph(
       x: paginator.getColumnX(state.columnIndex),
       y: 0, // Will be set by addFragment
       width: contentWidth,
-      height: linesHeight,
+      height: fragmentHeight,
       fromLine: currentLineIndex,
       toLine: currentLineIndex + fittingLines,
       pmStart: block.pmStart,
@@ -367,9 +410,23 @@ function layoutParagraph(
       continuesOnNext: !isLastFragment,
     };
 
+    // Treat trailing paragraph spacing as part of the paragraph box when it
+    // decides whether the whole final fragment fits on the current page.
+    if (isLastFragment && effectiveSpaceAfter > 0) {
+      const pendingSpacing = isFirstFragment ? state.trailingSpacing : 0;
+      const currentNeed = fragmentHeight + Math.max(effectiveSpaceBefore, pendingSpacing) + effectiveSpaceAfter;
+      const freshNeed = fragmentHeight + effectiveSpaceBefore + effectiveSpaceAfter;
+      const pageCapacity = state.contentBottom - state.topMargin;
+      const hasContentOnPage = state.page.fragments.length > 0;
+      if (currentNeed > availableHeight && freshNeed <= pageCapacity && hasContentOnPage && !nextForcesBreak) {
+        paginator.ensureFits(currentNeed);
+        continue;
+      }
+    }
+
     const result = paginator.addFragment(
       fragment,
-      linesHeight,
+      fragmentHeight,
       effectiveSpaceBefore,
       effectiveSpaceAfter
     );
@@ -462,6 +519,22 @@ function layoutTable(
         fittingRows++;
       } else {
         break;
+      }
+    }
+
+    // For tables with repeated header rows, avoid a first fragment that
+    // contains only header rows when a fresh column/page can fit body content.
+    if (isFirstFragment && headerRowCount > 0 && rows.length > headerRowCount) {
+      const firstBodyRowIndex = headerRowCount;
+      const firstBodyCandidateNeeds = rows
+        .slice(0, firstBodyRowIndex + 1)
+        .reduce((sum, row) => sum + row.height, 0);
+      const firstFragmentIsHeaderOnly = fittingRows > 0 && fittingRows <= headerRowCount;
+      const pageCapacity = state.contentBottom - state.topMargin;
+      const hasContentOnPage = state.page.fragments.length > 0;
+      if (firstFragmentIsHeaderOnly && firstBodyCandidateNeeds <= pageCapacity && hasContentOnPage) {
+        paginator.ensureFits(firstBodyCandidateNeeds + pendingSpacing);
+        continue;
       }
     }
 

@@ -44,6 +44,145 @@ interface HighlightRect {
   height: number;
 }
 
+type RenderRect = Pick<HighlightRect, 'x' | 'y' | 'width' | 'height'>;
+
+function findRawTagOffsets(text: string, rawTag: string): number[] {
+  const offsets: number[] = [];
+  let index = text.indexOf(rawTag);
+  while (index !== -1) {
+    offsets.push(index);
+    index = text.indexOf(rawTag, index + 1);
+  }
+  return offsets;
+}
+
+function nearestOffset(offsets: number[], expectedOffset: number): number {
+  return offsets.reduce((best, offset) =>
+    Math.abs(offset - expectedOffset) < Math.abs(best - expectedOffset) ? offset : best
+  );
+}
+
+function rectKey(rect: RenderRect): string {
+  return [
+    Math.round(rect.x * 100),
+    Math.round(rect.y * 100),
+    Math.round(rect.width * 100),
+    Math.round(rect.height * 100),
+  ].join(':');
+}
+
+function collectRawTagRectsFromSpan(
+  spanEl: HTMLElement,
+  rawTag: string,
+  context: RenderedDomContext,
+  containerRect: DOMRect,
+  preferredOffset?: number
+): RenderRect[] {
+  if (spanEl.firstChild?.nodeType !== Node.TEXT_NODE) return [];
+
+  const textNode = spanEl.firstChild as Text;
+  const text = textNode.textContent ?? '';
+  const offsets = findRawTagOffsets(text, rawTag);
+  if (offsets.length === 0) return [];
+
+  const ownerDoc = spanEl.ownerDocument;
+  if (!ownerDoc) return [];
+
+  const selectedOffsets =
+    preferredOffset === undefined ? offsets : [nearestOffset(offsets, preferredOffset)];
+  const rects: RenderRect[] = [];
+
+  for (const startChar of selectedOffsets) {
+    const endChar = startChar + rawTag.length;
+    if (endChar > textNode.length) continue;
+
+    const range = ownerDoc.createRange();
+    range.setStart(textNode, startChar);
+    range.setEnd(textNode, endChar);
+
+    for (const clientRect of Array.from(range.getClientRects())) {
+      rects.push({
+        x: (clientRect.left - containerRect.left) / context.zoom,
+        y: (clientRect.top - containerRect.top) / context.zoom,
+        width: clientRect.width / context.zoom,
+        height: clientRect.height / context.zoom,
+      });
+    }
+  }
+
+  return rects;
+}
+
+/**
+ * Header/footer content is rendered into visible page layers that can repeat
+ * the same ProseMirror range on every page. For template tags, project the
+ * overlay onto the exact visible raw tag text instead of relying only on the
+ * hidden editor decoration coordinates.
+ */
+export function getTemplateTagRects(
+  context: RenderedDomContext,
+  tag: TemplateTag,
+  options: { includeUnmappedHeaderFooter?: boolean } = {}
+): RenderRect[] {
+  const fallbackRects = () => context.getRectsForRange(tag.from, tag.to);
+
+  if (!tag.rawTag) {
+    return fallbackRects();
+  }
+
+  const containerRect = context.pagesContainer.getBoundingClientRect();
+  const rects: RenderRect[] = [];
+  const seen = new Set<string>();
+  const pushRects = (newRects: RenderRect[]) => {
+    for (const rect of newRects) {
+      const key = rectKey(rect);
+      if (!seen.has(key)) {
+        seen.add(key);
+        rects.push(rect);
+      }
+    }
+  };
+
+  const spans = context.pagesContainer.querySelectorAll('span[data-pm-start][data-pm-end]');
+  for (const span of Array.from(spans)) {
+    const spanEl = span as HTMLElement;
+    const pmStart = Number(spanEl.dataset.pmStart);
+    const pmEnd = Number(spanEl.dataset.pmEnd);
+
+    if (!Number.isFinite(pmStart) || !Number.isFinite(pmEnd)) continue;
+    if (!(pmEnd > tag.from && pmStart < tag.to)) continue;
+    pushRects(collectRawTagRectsFromSpan(spanEl, tag.rawTag, context, containerRect, tag.from - pmStart));
+  }
+
+  if (options.includeUnmappedHeaderFooter) {
+    const unmappedHeaderFooterRuns = context.pagesContainer.querySelectorAll(
+      [
+        '.layout-page-header .layout-run-text:not([data-pm-start])',
+        '.layout-page-footer .layout-run-text:not([data-pm-start])',
+      ].join(', ')
+    );
+
+    for (const run of Array.from(unmappedHeaderFooterRuns)) {
+      pushRects(collectRawTagRectsFromSpan(run as HTMLElement, tag.rawTag, context, containerRect));
+    }
+  }
+
+  return rects.length > 0 ? rects : fallbackRects();
+}
+
+export function shouldProjectUnmappedHeaderFooter(
+  tag: TemplateTag,
+  projectedRawTags: Set<string>,
+  activeTagIds: Set<string>
+): boolean {
+  if (!tag.rawTag) return false;
+  if (activeTagIds.has(tag.id)) return true;
+  if (projectedRawTags.has(tag.rawTag)) return false;
+
+  projectedRawTags.add(tag.rawTag);
+  return true;
+}
+
 export function TemplateHighlightOverlay({
   context,
   tags,
@@ -59,9 +198,17 @@ export function TemplateHighlightOverlay({
   const computeHighlights = useCallback((): HighlightRect[] => {
     const containerOffset = context.getContainerOffset();
     const rects: HighlightRect[] = [];
+    const projectedRawTags = new Set<string>();
+    const activeTagIds = new Set([hoveredId, selectedId].filter(Boolean) as string[]);
 
     for (const tag of tags) {
-      const tagRects = context.getRectsForRange(tag.from, tag.to);
+      const includeUnmappedHeaderFooter = shouldProjectUnmappedHeaderFooter(
+        tag,
+        projectedRawTags,
+        activeTagIds
+      );
+
+      const tagRects = getTemplateTagRects(context, tag, { includeUnmappedHeaderFooter });
       for (const rect of tagRects) {
         rects.push({
           tagId: tag.id,
@@ -75,7 +222,7 @@ export function TemplateHighlightOverlay({
     }
 
     return rects;
-  }, [context, tags]);
+  }, [context, hoveredId, selectedId, tags]);
 
   // Compute synchronously — no useEffect gap that causes blinking
 
@@ -117,6 +264,7 @@ export function TemplateHighlightOverlay({
           <div
             key={`${rect.tagId}-${index}`}
             className={`template-highlight ${isHovered ? 'hovered' : ''} ${isSelected ? 'selected' : ''}`}
+            data-tag-id={rect.tagId}
             style={{
               position: 'absolute',
               left: rect.x,

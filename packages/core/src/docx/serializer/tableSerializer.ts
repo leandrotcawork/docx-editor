@@ -726,8 +726,44 @@ function serializeTableCellPropertyChange(change: TableCellPropertyChange): stri
 /**
  * Serialize table grid (w:tblGrid)
  */
-function serializeTableGrid(columnWidths: number[] | undefined): string {
-  if (!columnWidths || columnWidths.length === 0) return '';
+function hasCompleteColumnWidths(columnWidths: number[] | undefined): columnWidths is number[] {
+  return (
+    Array.isArray(columnWidths) &&
+    columnWidths.length > 0 &&
+    columnWidths.every((width) => typeof width === 'number' && Number.isFinite(width) && width > 0)
+  );
+}
+
+function deriveGridFromRows(table: Table): number[] | undefined {
+  for (const row of table.rows) {
+    const columnWidths: number[] = [];
+    let usableRow = true;
+
+    for (const cell of row.cells) {
+      const span = cell.formatting?.gridSpan ?? 1;
+      const width = cell.formatting?.width;
+      if (span !== 1 || width?.type !== 'dxa' || !width.value || width.value <= 0) {
+        usableRow = false;
+        break;
+      }
+      columnWidths.push(width.value);
+    }
+
+    if (usableRow && hasCompleteColumnWidths(columnWidths)) return columnWidths;
+  }
+
+  return undefined;
+}
+
+function resolveTableGridColumnWidths(table: Table): number[] | undefined {
+  return hasCompleteColumnWidths(table.columnWidths)
+    ? table.columnWidths
+    : deriveGridFromRows(table);
+}
+
+function serializeTableGrid(table: Table): string {
+  const columnWidths = resolveTableGridColumnWidths(table);
+  if (!columnWidths) return '';
 
   const cols = columnWidths.map((w) => `<w:gridCol w:w="${w}"/>`);
 
@@ -834,7 +870,7 @@ export function serializeTable(table: Table): string {
   }
 
   // Table grid
-  const tblGridXml = serializeTableGrid(table.columnWidths);
+  const tblGridXml = serializeTableGrid(table);
   if (tblGridXml) {
     parts.push(tblGridXml);
   }

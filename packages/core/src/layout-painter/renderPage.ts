@@ -14,6 +14,7 @@ import type {
   ParagraphMeasure,
   ParagraphFragment,
   ParagraphBorders,
+  CellBorders,
   TableBlock,
   TableMeasure,
   TableFragment,
@@ -202,6 +203,97 @@ interface HeaderFooterLayoutInfo {
     right: number;
     bottom: number;
     left: number;
+  };
+}
+
+function isVisibleBorder(border: { style?: string; width?: number } | undefined): boolean {
+  return !!border && border.style !== 'none' && border.style !== 'nil' && border.width !== 0;
+}
+
+function headerFooterCellBorderHeight(cell: { borders?: CellBorders }): number {
+  const borders = cell.borders;
+  if (!borders) return 0;
+
+  return (
+    (isVisibleBorder(borders.top) ? borders.top?.width ?? 0 : 0) +
+    (isVisibleBorder(borders.bottom) ? borders.bottom?.width ?? 0 : 0)
+  );
+}
+
+function maxImageHeightInBlocks(blocks: FlowBlock[]): number {
+  let maxHeight = 0;
+
+  for (const block of blocks) {
+    if (block.kind !== 'paragraph') continue;
+    const paragraph = block as ParagraphBlock;
+    for (const run of paragraph.runs) {
+      if (run.kind === 'image' && typeof run.height === 'number') {
+        maxHeight = Math.max(maxHeight, run.height);
+      }
+    }
+  }
+
+  return maxHeight;
+}
+
+function minMeasuredParagraphHeight(measures: Measure[]): number {
+  let minHeight = 0;
+
+  for (const measure of measures) {
+    if (measure.kind !== 'paragraph' || measure.totalHeight <= 0) continue;
+    minHeight = minHeight === 0 ? measure.totalHeight : Math.min(minHeight, measure.totalHeight);
+  }
+
+  return minHeight;
+}
+
+function reconcileHeaderFooterTableRowHeights(
+  block: TableBlock,
+  measure: TableMeasure,
+  context: RenderContext
+): TableMeasure {
+  if (context.section !== 'header' && context.section !== 'footer') return measure;
+  if (!measure.rows.length) return measure;
+
+  const rows = measure.rows.map((rowMeasure, rowIndex) => {
+    const row = block.rows[rowIndex];
+    let rowHeight = rowMeasure.height;
+
+    if (!row?.height) {
+      let maxImageHeight = 0;
+      let minParagraphHeight = 0;
+      let maxBorderHeight = 0;
+
+      for (let cellIndex = 0; cellIndex < (row?.cells.length ?? 0); cellIndex++) {
+        const cell = row!.cells[cellIndex];
+        const cellMeasure = rowMeasure.cells[cellIndex];
+        if (!cell || !cellMeasure) continue;
+
+        maxImageHeight = Math.max(maxImageHeight, maxImageHeightInBlocks(cell.blocks));
+        minParagraphHeight = Math.max(minParagraphHeight, minMeasuredParagraphHeight(cellMeasure.blocks));
+        maxBorderHeight = Math.max(maxBorderHeight, headerFooterCellBorderHeight(cell));
+      }
+
+      if (maxImageHeight > 0 || minParagraphHeight > 0) {
+        const requiredHeight = Math.max(maxImageHeight, minParagraphHeight) + maxBorderHeight;
+        if (rowHeight < requiredHeight - 0.5) rowHeight = requiredHeight;
+      }
+    }
+
+    return {
+      ...rowMeasure,
+      height: rowHeight,
+      cells: rowMeasure.cells.map((cellMeasure) => ({
+        ...cellMeasure,
+        height: Math.max(cellMeasure.height ?? 0, rowHeight),
+      })),
+    };
+  });
+
+  return {
+    ...measure,
+    rows,
+    totalHeight: rows.reduce((height, row) => height + row.height, 0),
   };
 }
 
@@ -760,6 +852,38 @@ function renderHeaderFooterContent(
 
       containerEl.appendChild(fragEl);
       cursorY += paragraphMeasure.totalHeight;
+    } else if (block?.kind === 'table' && measure?.kind === 'table') {
+      const tableBlock = block as TableBlock;
+      const tableMeasure = reconcileHeaderFooterTableRowHeights(
+        tableBlock,
+        measure as TableMeasure,
+        context
+      );
+      const syntheticFragment: TableFragment = {
+        kind: 'table',
+        blockId: tableBlock.id,
+        x: 0,
+        y: cursorY,
+        width: tableMeasure.totalWidth,
+        height: tableMeasure.totalHeight,
+        fromRow: 0,
+        toRow: tableBlock.rows.length,
+        pmStart: tableBlock.pmStart,
+        pmEnd: tableBlock.pmEnd,
+      };
+
+      const tableEl = renderTableFragment(
+        syntheticFragment,
+        tableBlock,
+        tableMeasure,
+        context,
+        { document: doc }
+      );
+      tableEl.style.position = 'relative';
+      tableEl.style.marginBottom = '0';
+
+      containerEl.appendChild(tableEl);
+      cursorY += tableMeasure.totalHeight;
     }
   }
 
