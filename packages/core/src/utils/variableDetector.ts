@@ -103,21 +103,37 @@ export function detectVariablesDetailed(doc: Document): VariableDetectionResult 
     byLocation.body = Array.from(new Set(bodyVars)).sort();
   }
 
-  // Scan headers and footers
-  if (doc.package?.document?.sections) {
-    doc.package.document.sections.forEach((section, _sectionIndex) => {
-      // Headers
-      if (section.properties.headerReferences) {
-        section.properties.headerReferences.forEach((_headerRef) => {
-          // If we have actual header content, scan it
-          // Note: Headers are stored separately in the package
-        });
+  const referencedHeaderIds = collectReferencedHeaderFooterIds(doc.package?.document, 'header');
+  const referencedFooterIds = collectReferencedHeaderFooterIds(doc.package?.document, 'footer');
+
+  // Scan headers and footers referenced by document sections.
+  if (doc.package?.headers && referencedHeaderIds.length > 0) {
+    const headerVars: string[] = [];
+    for (const rId of referencedHeaderIds) {
+      const header = doc.package.headers.get(rId);
+      if (header) {
+        headerVars.push(...detectVariablesInHeaderFooter(header));
       }
+    }
+    headerVars.forEach((v) => {
+      occurrences.push({ name: v, location: 'header' });
     });
+    byLocation.headers = Array.from(new Set(headerVars)).sort();
   }
 
-  // Scan footers from package
-  // (Actual footer content would be accessed from pkg.headers/pkg.footers if available)
+  if (doc.package?.footers && referencedFooterIds.length > 0) {
+    const footerVars: string[] = [];
+    for (const rId of referencedFooterIds) {
+      const footer = doc.package.footers.get(rId);
+      if (footer) {
+        footerVars.push(...detectVariablesInHeaderFooter(footer));
+      }
+    }
+    footerVars.forEach((v) => {
+      occurrences.push({ name: v, location: 'footer' });
+    });
+    byLocation.footers = Array.from(new Set(footerVars)).sort();
+  }
 
   // Scan footnotes
   if (doc.package?.footnotes) {
@@ -179,6 +195,27 @@ export function detectVariablesInBody(body: DocumentBody): string[] {
   }
 
   return variables;
+}
+
+function collectReferencedHeaderFooterIds(
+  body: DocumentBody | undefined,
+  kind: 'header' | 'footer'
+): string[] {
+  if (!body) return [];
+
+  const ids = new Set<string>();
+  const addReferences = (properties: DocumentBody['finalSectionProperties']): void => {
+    const references =
+      kind === 'header' ? properties?.headerReferences : properties?.footerReferences;
+    references?.forEach((ref) => {
+      if (ref.rId) ids.add(ref.rId);
+    });
+  };
+
+  body.sections?.forEach((section) => addReferences(section.properties));
+  addReferences(body.finalSectionProperties);
+
+  return Array.from(ids);
 }
 
 /**
