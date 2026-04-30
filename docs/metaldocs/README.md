@@ -6,6 +6,7 @@ This directory documents the Metal Docs EigenPal fork work. It is intentionally 
 
 - [Header/Footer Table Lab Dossier](./header-footer-table-lab-dossier.md): investigation log and implementation rationale from the isolated lab.
 - [Upstream PR Readiness](./upstream-pr-readiness.md): concise PR-ready summary, validation notes, residual follow-ups, and PR body draft.
+- [PR Splitting Plan](./pr-splitting-plan.md): recommended structure if this fork patch is converted into public upstream PRs.
 
 ## Branching Model
 
