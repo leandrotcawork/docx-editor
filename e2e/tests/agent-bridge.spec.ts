@@ -125,6 +125,87 @@ test.describe('Agent bridge — paraId-anchored mutations', () => {
     expect(afterCount - beforeCount).toBe(5);
   });
 
+  test('programmatic addComment lays out sidebar cards without overlap (no click required)', async ({
+    page,
+  }) => {
+    // Regression: adding comments via the agent ref previously did not trigger
+    // the sidebar to re-measure card heights, so multiple cards anchored to
+    // nearby paragraphs would overlap until the user clicked one — which fired
+    // the [expandedItem] re-measure effect and snapped the layout into place.
+
+    await page.waitForFunction(() => Boolean(window.__DOCX_EDITOR_E2E__), undefined, {
+      timeout: 15000,
+    });
+
+    // Pull paraIds from page 1 via the bridge. Need at least 3 distinct
+    // paragraphs so we can anchor each comment to its own paragraph.
+    const paraIds: string[] = await page.evaluate(() => {
+      const page = window.__DOCX_EDITOR_E2E__?.agentGetPageContent(1);
+      const ids = new Set<string>();
+      for (const p of page?.paragraphs ?? []) {
+        if (p.paraId) ids.add(p.paraId);
+        if (ids.size >= 3) break;
+      }
+      return Array.from(ids);
+    });
+    test.skip(paraIds.length < 3, 'Fixture lacks 3 paragraphs with paraIds');
+
+    // Long body text that wraps across multiple lines so the rendered card is
+    // taller than the 80px height estimate. Without a re-measure on add,
+    // collision avoidance under-estimates and stacked cards overlap the
+    // taller real cards above them.
+    const longText =
+      'This is a deliberately long comment body that wraps across several ' +
+      'lines so the rendered card is taller than the 80 pixel height ' +
+      'estimate used by collision avoidance before cards are measured.';
+
+    // Baseline: one comment fully rendered before streaming the rest.
+    const firstId = await page.evaluate(
+      ([id, body]) =>
+        window.__DOCX_EDITOR_E2E__?.agentAddComment({ paraId: id!, text: body! }) ?? null,
+      [paraIds[0], longText]
+    );
+    expect(typeof firstId).toBe('number');
+    await expect(page.locator('.docx-comment-card')).toHaveCount(1, { timeout: 5000 });
+    await page.waitForTimeout(500);
+
+    await page.evaluate(
+      ([ids, body]) => {
+        const hook = window.__DOCX_EDITOR_E2E__;
+        if (!hook) return;
+        for (let i = 1; i < ids.length; i++) {
+          hook.agentAddComment({ paraId: ids[i]!, text: `${body} (#${i + 1})` });
+        }
+      },
+      [paraIds, longText]
+    );
+
+    await expect(page.locator('.docx-comment-card')).toHaveCount(paraIds.length, {
+      timeout: 5000,
+    });
+    // Do NOT click any card — clicking triggers the [expandedItem] re-measure
+    // and would mask the bug. Wait for the [items.length] effect to settle.
+    await page.waitForTimeout(600);
+
+    const overlaps = await page.evaluate(() => {
+      const cards = Array.from(
+        document.querySelectorAll('.docx-unified-sidebar .docx-comment-card')
+      ) as HTMLElement[];
+      const rects = cards
+        .map((el) => el.getBoundingClientRect())
+        .filter((r) => r.height > 0 && r.width > 0)
+        .sort((a, b) => a.top - b.top);
+      const collisions: Array<{ a: number; b: number; gap: number }> = [];
+      for (let i = 1; i < rects.length; i++) {
+        const gap = rects[i].top - rects[i - 1].bottom;
+        if (gap < -0.5) collisions.push({ a: i - 1, b: i, gap });
+      }
+      return { count: rects.length, collisions };
+    });
+    expect(overlaps.count).toBe(paraIds.length);
+    expect(overlaps.collisions).toEqual([]);
+  });
+
   test('proposeChange creates a tracked change visible in the editor', async ({ page }) => {
     await getFirstParaId(page);
 
@@ -249,5 +330,170 @@ test.describe('Agent bridge — paraId-anchored mutations', () => {
       () => window.__DOCX_EDITOR_E2E__?.scrollToParaId('NOT_A_PARA_ID') ?? null
     );
     expect(ok).toBe(false);
+  });
+
+  // Vanilla view: the agent only sees the document as it exists right now,
+  // before any tracked-change suggestions are accepted. Deletion text is
+  // still in the doc → searchable. Insertion text isn't in the doc yet →
+  // not searchable. This test creates a redline via proposeChange, then
+  // verifies addComment's anchor search treats the two halves accordingly.
+  test('addComment search respects the vanilla view (deletion findable, insertion not)', async ({
+    page,
+  }) => {
+    await getFirstParaId(page);
+
+    const target = await pickUniqueMatch(page);
+    test.skip(!target, 'No paragraph with a uniquely-findable phrase');
+    const paraId = target!.paraId;
+    const match = target!.match;
+
+    // Stage a redline: replace `match` with `AGENT-INSERTED`. Now the
+    // paragraph contains <w:del>match</w:del><w:ins>AGENT-INSERTED</w:ins>.
+    const proposed = await page.evaluate(
+      ([id, search]) =>
+        window.__DOCX_EDITOR_E2E__?.agentProposeChange({
+          paraId: id,
+          search,
+          replaceWith: 'AGENT-INSERTED',
+        }) ?? false,
+      [paraId, match]
+    );
+    expect(proposed).toBe(true);
+
+    // The deletion text is still in the vanilla doc — addComment finds it.
+    const onDeletion = await page.evaluate(
+      ([id, search]) =>
+        window.__DOCX_EDITOR_E2E__?.agentAddComment({
+          paraId: id,
+          text: 'comment-on-deleted-text',
+          search,
+        }) ?? null,
+      [paraId, match]
+    );
+    expect(typeof onDeletion).toBe('number');
+
+    // The insertion text isn't in the vanilla doc — addComment can't find it.
+    const onInsertion = await page.evaluate(
+      ([id]) =>
+        window.__DOCX_EDITOR_E2E__?.agentAddComment({
+          paraId: id,
+          text: 'comment-on-inserted-text',
+          search: 'AGENT-INSERTED',
+        }) ?? null,
+      [paraId]
+    );
+    expect(onInsertion).toBeNull();
+  });
+
+  // After a redline, the agent's read_document → find_text → add_comment chain
+  // should still work end-to-end on the deletion text. This pins the alignment
+  // between findInDocument (live editor's find_text source) and addComment.
+  test('findInDocument still returns the deletion text after a redline', async ({ page }) => {
+    await getFirstParaId(page);
+
+    const target = await pickUniqueMatch(page);
+    test.skip(!target, 'No paragraph with a uniquely-findable phrase');
+    const paraId = target!.paraId;
+    const match = target!.match;
+
+    const proposed = await page.evaluate(
+      ([id, search]) =>
+        window.__DOCX_EDITOR_E2E__?.agentProposeChange({
+          paraId: id,
+          search,
+          replaceWith: 'AGENT-INSERTED-2',
+        }) ?? false,
+      [paraId, match]
+    );
+    expect(proposed).toBe(true);
+
+    // The deletion text is still in the vanilla doc — find_text returns it.
+    const found = await page.evaluate(
+      ([search]) => window.__DOCX_EDITOR_E2E__?.agentFind(search) ?? [],
+      [match]
+    );
+    expect(Array.isArray(found)).toBe(true);
+    expect(found.length).toBeGreaterThan(0);
+    expect(found[0].paraId).toBe(paraId);
+
+    // ...and the same handle anchors a comment.
+    const cid = await page.evaluate(
+      ([id, search]) =>
+        window.__DOCX_EDITOR_E2E__?.agentAddComment({
+          paraId: id,
+          text: 'find-then-anchor',
+          search,
+        }) ?? null,
+      [paraId, match]
+    );
+    expect(typeof cid).toBe('number');
+  });
+
+  // After staging an insertion, the inserted text must not appear in
+  // findInDocument (the source of `find_text`). Otherwise the agent could
+  // surface a phrase via find_text that it cannot anchor via add_comment.
+  test('findInDocument does not return inserted text after a redline', async ({ page }) => {
+    await getFirstParaId(page);
+
+    const target = await pickUniqueMatch(page);
+    test.skip(!target, 'No paragraph with a uniquely-findable phrase');
+    const paraId = target!.paraId;
+    const match = target!.match;
+
+    const proposed = await page.evaluate(
+      ([id, search]) =>
+        window.__DOCX_EDITOR_E2E__?.agentProposeChange({
+          paraId: id,
+          search,
+          replaceWith: 'AGENT-INSERTED-3',
+        }) ?? false,
+      [paraId, match]
+    );
+    expect(proposed).toBe(true);
+
+    const found = await page.evaluate(
+      () => window.__DOCX_EDITOR_E2E__?.agentFind('AGENT-INSERTED-3') ?? []
+    );
+    expect(found).toEqual([]);
+  });
+
+  // Phrase that exists in plain text AND inside an insertion. Pre-fix, the
+  // search would treat both as candidates and refuse for ambiguity. Post-fix,
+  // the insertion text is invisible so the anchor lands on the plain occurrence.
+  test('addComment resolves on the plain occurrence when the same phrase is also inside an insertion', async ({
+    page,
+  }) => {
+    await getFirstParaId(page);
+
+    const target = await pickUniqueMatch(page);
+    test.skip(!target, 'No paragraph with a uniquely-findable phrase');
+    const paraId = target!.paraId;
+    const match = target!.match;
+
+    // Insert (as a tracked change) text that happens to repeat `match`. The
+    // staged insertion now contains `match` once; the original paragraph
+    // still contains `match` once. Two candidates total — but only one is
+    // visible in the vanilla view.
+    const proposed = await page.evaluate(
+      ([id, replaceWith]) =>
+        window.__DOCX_EDITOR_E2E__?.agentProposeChange({
+          paraId: id,
+          search: '',
+          replaceWith,
+        }) ?? false,
+      [paraId, ` extra ${match} extra`]
+    );
+    expect(proposed).toBe(true);
+
+    const cid = await page.evaluate(
+      ([id, search]) =>
+        window.__DOCX_EDITOR_E2E__?.agentAddComment({
+          paraId: id,
+          text: 'plain-occurrence-anchor',
+          search,
+        }) ?? null,
+      [paraId, match]
+    );
+    expect(typeof cid).toBe('number');
   });
 });
