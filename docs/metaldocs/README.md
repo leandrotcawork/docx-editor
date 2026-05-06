@@ -5,6 +5,7 @@ This directory documents the Metal Docs EigenPal fork work. It is intentionally 
 ## Documents
 
 - [Header/Footer Table Lab Dossier](./header-footer-table-lab-dossier.md): investigation log and implementation rationale from the isolated lab.
+- [Maintainer Change Summary](./maintainer-change-summary.md): maintainer-facing explanation of the bugs, root causes, files changed, and why the fork patch exists.
 - [Upstream PR Readiness](./upstream-pr-readiness.md): concise PR-ready summary, validation notes, residual follow-ups, and PR body draft.
 - [PR Splitting Plan](./pr-splitting-plan.md): recommended structure if this fork patch is converted into public upstream PRs.
 
@@ -12,6 +13,8 @@ This directory documents the Metal Docs EigenPal fork work. It is intentionally 
 
 - `origin`: upstream EigenPal repository.
 - `fork`: Metal Docs controlled GitHub fork.
-- `codex/eigenpal-professional-patch`: implementation branch containing the professional patch.
+- `main`: stable Metal Docs EigenPal fork branch.
+- `metaldocs-eigenpal-v0.2.0`: release tag for the first stable Metal Docs EigenPal patch package.
+- `codex/eigenpal-professional-patch`: historical implementation branch that produced the first professional patch.
 
-Keep this fork as the controlled source of the EigenPal changes. Do not integrate it into Metal Docs without a separate integration plan.
+Keep this fork as the controlled source of the EigenPal changes. Product integration should consume a versioned package artifact or release tag, not an ad hoc local lab path.
