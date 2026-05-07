@@ -5,9 +5,12 @@
  * is correctly resolved to RGB values on ProseMirror tableCell node attrs.
  */
 
-import { describe, test, expect } from 'bun:test';
+import { describe, test, expect, beforeAll, afterAll } from 'bun:test';
+import { GlobalRegistrator } from '@happy-dom/global-registrator';
+import { DOMParser, DOMSerializer } from 'prosemirror-model';
 import { toProseDoc } from './toProseDoc';
 import { fromProseDoc } from './fromProseDoc';
+import { schema } from '../schema';
 import type { Document, Table, TableRow, TableCell, Theme } from '../../types/document';
 
 const OFFICE_THEME: Theme = {
@@ -27,6 +30,9 @@ const OFFICE_THEME: Theme = {
   },
 };
 
+beforeAll(() => GlobalRegistrator.register());
+afterAll(() => GlobalRegistrator.unregister());
+
 function makeCell(shading?: TableCell['formatting'] extends infer F ? F : never): TableCell {
   return {
     type: 'tableCell',
@@ -43,6 +49,28 @@ function makeCell(shading?: TableCell['formatting'] extends infer F ? F : never)
 function makeTable(cells: TableCell[]): Table {
   const row: TableRow = { type: 'tableRow', cells };
   return { type: 'table', rows: [row] };
+}
+
+function makeWidthTypedTable(
+  cells: TableCell[],
+  columnWidths: number[],
+  width?: number,
+  type: 'dxa' | 'pct' = 'dxa'
+): Table {
+  const row: TableRow = { type: 'tableRow', cells };
+  return {
+    type: 'table',
+    rows: [row],
+    columnWidths,
+    formatting: width
+      ? {
+          width: {
+            value: width,
+            type,
+          },
+        }
+      : undefined,
+  };
 }
 
 function makeDocument(table: Table, theme?: Theme): Document {
@@ -134,6 +162,68 @@ describe('toProseDoc — table cell theme color resolution', () => {
     expect(cells[0].backgroundColor).toBe('8FAADC');
     // tint=33 (0.2) → near-white
     expect(cells[1].backgroundColor).toBe('DAE3F3');
+  });
+
+  test('fixed-width imported table cells materialize colwidth in px for PM resizing', () => {
+    const leftCell = makeCell({
+      width: { value: 4200, type: 'dxa' },
+    });
+    const rightCell = makeCell({
+      width: { value: 4826, type: 'dxa' },
+    });
+
+    const doc = makeDocument(makeWidthTypedTable([leftCell, rightCell], [4200, 4826], 9026));
+    const pmDoc = toProseDoc(doc);
+    const cells = collectCellAttrs(pmDoc);
+
+    expect(cells[0].width).toBe(4200);
+    expect(cells[0].widthType).toBe('dxa');
+    expect(cells[0].colwidth).toEqual([280]);
+
+    expect(cells[1].width).toBe(4826);
+    expect(cells[1].widthType).toBe('dxa');
+    expect(cells[1].colwidth).toEqual([322]);
+  });
+
+  test('fixed-width imported table cells serialize and parse data-colwidth for PM resize handles', () => {
+    const leftCell = makeCell({
+      width: { value: 4200, type: 'dxa' },
+    });
+    const rightCell = makeCell({
+      width: { value: 4826, type: 'dxa' },
+    });
+
+    const doc = makeDocument(makeWidthTypedTable([leftCell, rightCell], [4200, 4826], 9026));
+    const pmDoc = toProseDoc(doc);
+    const serializer = DOMSerializer.fromSchema(schema);
+    const fragment = serializer.serializeFragment(pmDoc.content, { document });
+    const container = document.createElement('div');
+    container.appendChild(fragment);
+
+    const domCells = Array.from(container.querySelectorAll('td, th'));
+    expect(domCells[0]?.getAttribute('data-colwidth')).toBe('280');
+    expect(domCells[1]?.getAttribute('data-colwidth')).toBe('322');
+
+    const parsed = DOMParser.fromSchema(schema).parse(container);
+    const parsedCells = collectCellAttrs(parsed);
+    expect(parsedCells[0].colwidth).toEqual([280]);
+    expect(parsedCells[1].colwidth).toEqual([322]);
+  });
+
+  test('non-fixed imported tables do not materialize fixed colwidth metadata', () => {
+    const leftCell = makeCell({
+      width: { value: 4200, type: 'dxa' },
+    });
+    const rightCell = makeCell({
+      width: { value: 4826, type: 'dxa' },
+    });
+
+    const doc = makeDocument(makeWidthTypedTable([leftCell, rightCell], [4200, 4826], 5000, 'pct'));
+    const pmDoc = toProseDoc(doc);
+    const cells = collectCellAttrs(pmDoc);
+
+    expect(cells[0].colwidth).toBeFalsy();
+    expect(cells[1].colwidth).toBeFalsy();
   });
 });
 
