@@ -48,6 +48,10 @@ import { resolveColorToHex } from '../../utils/colorResolver';
 import { mergeTextFormatting } from '../../utils/textFormattingMerge';
 import type { Theme } from '../../types/document';
 
+function twipsToPixels(twips: number): number {
+  return Math.round((twips / 1440) * 96);
+}
+
 /**
  * Options for document conversion
  */
@@ -660,6 +664,7 @@ function convertTable(
       isFirstRowStyled,
       columnWidths,
       totalWidth,
+      table.formatting?.width?.type,
       conditionalStyles,
       rowBandStyle,
       bandingEnabledV,
@@ -686,6 +691,7 @@ function convertTableRow(
   isHeaderRow: boolean,
   columnWidths?: number[],
   totalWidth?: number,
+  tableWidthType?: 'auto' | 'dxa' | 'nil' | 'pct',
   conditionalStyles?: {
     wholeTable?: { tcPr?: TableCellFormatting; rPr?: TextFormatting };
     firstRow?: { tcPr?: TableCellFormatting; rPr?: TextFormatting };
@@ -746,11 +752,15 @@ function convertTableRow(
 
     // Calculate the width for this cell from columnWidths if cell doesn't have own width
     let gridWidth: number | undefined;
+    let gridColumnWidths: number[] | undefined;
     if (columnWidths && totalWidth && totalWidth > 0) {
       // Sum widths for all columns this cell spans
       let cellWidthTwips = 0;
       for (let i = 0; i < colspan && colIndex + i < columnWidths.length; i++) {
         cellWidthTwips += columnWidths[colIndex + i];
+      }
+      if (tableWidthType === 'dxa') {
+        gridColumnWidths = columnWidths.slice(colIndex, colIndex + colspan);
       }
       // Convert to percentage of total table width
       gridWidth = Math.round((cellWidthTwips / totalWidth) * 100);
@@ -883,6 +893,8 @@ function convertTableRow(
         styleResolver,
         isHeaderRow,
         gridWidth,
+        tableWidthType,
+        gridColumnWidths,
         cellConditionalStyle,
         tableBorders,
         isFirstRow,
@@ -907,6 +919,8 @@ function convertTableCell(
   styleResolver: StyleResolver | null,
   isHeader: boolean,
   gridWidthPercent?: number,
+  tableWidthType?: 'auto' | 'dxa' | 'nil' | 'pct',
+  gridColumnWidths?: number[],
   conditionalStyle?: { tcPr?: TableCellFormatting; rPr?: TextFormatting },
   tableBorders?: TableBorders,
   isFirstRow?: boolean,
@@ -932,6 +946,15 @@ function convertTableCell(
     width = gridWidthPercent;
     widthType = 'pct';
   }
+  const colspan = formatting?.gridSpan ?? 1;
+  const gridColwidth =
+    gridColumnWidths && gridColumnWidths.length === colspan
+      ? gridColumnWidths.map(twipsToPixels)
+      : undefined;
+  const explicitColwidth =
+    tableWidthType === 'dxa' && widthType === 'dxa' && typeof width === 'number' && colspan === 1
+      ? [twipsToPixels(width)]
+      : undefined;
 
   // Cell's own shading wins; fall back to the table style's conditional row/col shading.
   const backgroundColor = resolveColorToHex(
@@ -963,8 +986,9 @@ function convertTableCell(
       : undefined;
 
   const attrs: TableCellAttrs = {
-    colspan: formatting?.gridSpan ?? 1,
+    colspan: colspan,
     rowspan: rowspan,
+    colwidth: explicitColwidth ?? gridColwidth,
     width: width,
     widthType: widthType,
     verticalAlign: formatting?.verticalAlign,
