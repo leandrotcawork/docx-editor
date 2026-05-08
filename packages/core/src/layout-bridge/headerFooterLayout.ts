@@ -131,7 +131,9 @@ function normalizeTableBlock(block: TableBlock): TableBlock {
     let rowChanged = false;
     const cells = row.cells.map((cell) => {
       const normalizedBlocks = normalizeFlowBlockArray(cell.blocks);
-      const cellChanged = normalizedBlocks.some((normalizedBlock, idx) => normalizedBlock !== cell.blocks[idx]);
+      const cellChanged = normalizedBlocks.some(
+        (normalizedBlock, idx) => normalizedBlock !== cell.blocks[idx]
+      );
       if (!cellChanged) return cell;
       rowChanged = true;
       return { ...cell, blocks: normalizedBlocks };
@@ -296,7 +298,12 @@ export function convertHeaderFooterToContent(
     if (m.kind === 'textBox') return h + m.height;
     return h;
   }, 0);
-  const { visualTop, visualBottom } = calculateHeaderFooterVisualBounds(blocks, measures, totalHeight, metrics);
+  const { visualTop, visualBottom } = calculateHeaderFooterVisualBounds(
+    blocks,
+    measures,
+    totalHeight,
+    metrics
+  );
 
   return {
     blocks: blocksForMeasure,

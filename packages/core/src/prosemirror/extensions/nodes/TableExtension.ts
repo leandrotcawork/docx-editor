@@ -299,11 +299,7 @@ function buildCellBorderStyles(attrs: TableCellAttrs): string[] {
 
   if (!borders) return styles;
 
-  const borderToCss = (border?: {
-    style?: string;
-    size?: number;
-    color?: ColorValue;
-  }): string => {
+  const borderToCss = (border?: { style?: string; size?: number; color?: ColorValue }): string => {
     if (!border || !border.style || border.style === 'none' || border.style === 'nil') {
       return 'none';
     }
