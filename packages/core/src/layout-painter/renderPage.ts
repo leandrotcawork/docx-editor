@@ -930,6 +930,7 @@ function renderHeaderFooterContent(
     if (block.kind === 'paragraph' && measure.kind === 'paragraph') {
       const paragraphBlock = block as ParagraphBlock;
       const paragraphMeasure = measure as ParagraphMeasure;
+      const paragraphSpacingBefore = paragraphBlock.attrs?.spacing?.before ?? 0;
 
       // Track the Y position where this paragraph starts
       const paragraphStartY = cursorY;
@@ -984,7 +985,7 @@ function renderHeaderFooterContent(
         kind: 'paragraph',
         blockId: paragraphBlock.id,
         x: 0,
-        y: cursorY,
+        y: cursorY + paragraphSpacingBefore,
         width: contentWidth,
         height: paragraphMeasure.totalHeight,
         fromLine: 0,
@@ -1005,7 +1006,7 @@ function renderHeaderFooterContent(
         { document: doc }
       );
 
-      fragEl.style.top = `${cursorY}px`;
+      fragEl.style.top = `${cursorY + paragraphSpacingBefore}px`;
       fragEl.style.left = '0';
       fragEl.style.width = `${contentWidth}px`;
 

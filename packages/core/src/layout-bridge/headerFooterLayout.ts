@@ -11,14 +11,13 @@
  *     → measureBlocks (caller-supplied, Canvas-aware)
  *     → HeaderFooterContent (blocks, measures, height, visualTop/Bottom)
  *
- * The render side uses the ORIGINAL block list (full data: floating images,
- * inherited spacing). Measurement uses a normalized copy from
- * {@link normalizeHeaderFooterMeasureBlocks} that drops things Word does
- * not visually account for in HF height (floating images, style-inherited
- * spacing) and zeroes the canonical trailing-empty-paragraph-after-table.
+ * The render side uses the normalized block list so paint and measurement stay
+ * in lockstep. Visual-bounds calculation still inspects the original block
+ * list because floating images can paint above/below the nominal flow box even
+ * when they do not contribute to flow height.
  */
 
-import type { FlowBlock, ImageRun, Measure, PageMargins, Run } from '../layout-engine/types';
+import type { FlowBlock, ImageRun, Measure, PageMargins, TableBlock } from '../layout-engine/types';
 import type { HeaderFooter, StyleDefinitions, Theme } from '../types/document';
 import type { HeaderFooterContent } from '../layout-painter/renderPage';
 import { headerFooterToProseDoc } from '../prosemirror/conversion/toProseDoc';
@@ -40,21 +39,17 @@ export type HeaderFooterMetrics = {
 // 2. Measurement-time block normalization
 // ============================================================================
 //
-// Two transforms are applied to the FlowBlock list before measurement:
+// Two transforms are applied to the FlowBlock list before measurement/render:
 //
-// 1. **Drop anchored / floating images** (#358) — they're positioned
-//    absolutely at page level and don't contribute to in-flow paragraph
-//    height. The measurement copy renders only the inline runs.
-//
-// 2. **Strip style-inherited paragraph spacing** (#380) — Word visibly
+// 1. **Strip style-inherited paragraph spacing** (#380) — Word visibly
 //    does NOT honor inherited `spaceBefore` / `spaceAfter` (e.g. Normal's
 //    default 8pt-after) inside the HF text frame. Inline `<w:spacing>`
 //    set explicitly on the HF paragraph IS honored. The parser flags
 //    inline spacing via `spacingExplicit.before` / `.after`; anything
 //    not flagged was inherited from the style chain and is zeroed for
-//    measurement.
+//    both measurement and painting.
 //
-// 3. **Zero trailing empty paragraph after a table** (#381) — OOXML
+// 2. **Zero trailing empty paragraph after a table** (#381) — OOXML
 //    requires a trailing block-level element after the last `<w:tbl>`
 //    in any block container, including `<w:hdr>` / `<w:ftr>`. Word
 //    renders that empty paragraph as a zero-height anchor (just the
@@ -68,10 +63,6 @@ export type HeaderFooterMetrics = {
 //    `spacingExplicit` are NOT suppressed — they exist for their
 //    visual side effect, not just as a structural anchor.
 
-function isAnchoredImageRun(run: Run): boolean {
-  return run.kind === 'image' && !!run.position;
-}
-
 function hasAuthoredVisualContent(block: FlowBlock): boolean {
   if (block.kind !== 'paragraph') return false;
   const attrs = block.attrs;
@@ -82,6 +73,10 @@ function hasAuthoredVisualContent(block: FlowBlock): boolean {
 }
 
 export function normalizeHeaderFooterMeasureBlocks(blocks: FlowBlock[]): FlowBlock[] {
+  return normalizeFlowBlockArray(blocks);
+}
+
+function normalizeFlowBlockArray(blocks: FlowBlock[]): FlowBlock[] {
   const trailingEmptyAfterTable = new Set<number>();
   for (let i = 1; i < blocks.length; i++) {
     const prev = blocks[i - 1];
@@ -94,6 +89,9 @@ export function normalizeHeaderFooterMeasureBlocks(blocks: FlowBlock[]): FlowBlo
   }
 
   return blocks.map((block, index) => {
+    if (block.kind === 'table') {
+      return normalizeTableBlock(block);
+    }
     if (block.kind !== 'paragraph') return block;
 
     const isTrailingEmpty = trailingEmptyAfterTable.has(index);
@@ -105,17 +103,7 @@ export function normalizeHeaderFooterMeasureBlocks(blocks: FlowBlock[]): FlowBlo
     const afterIsInherited = hasResolvedAfter && !explicit?.after;
     const stripsSpacing = beforeIsInherited || afterIsInherited;
 
-    const stripsImages = block.runs.some(isAnchoredImageRun);
-
-    if (!stripsSpacing && !stripsImages && !isTrailingEmpty) return block;
-
-    let inlineRuns: Run[] = block.runs;
-    if (stripsImages) {
-      inlineRuns = block.runs.filter((r) => !isAnchoredImageRun(r));
-      if (inlineRuns.length === 0) {
-        inlineRuns = [{ kind: 'text' as const, text: '' }];
-      }
-    }
+    if (!stripsSpacing && !isTrailingEmpty) return block;
 
     let attrs = block.attrs;
     if (stripsSpacing && attrs?.spacing) {
@@ -133,8 +121,27 @@ export function normalizeHeaderFooterMeasureBlocks(blocks: FlowBlock[]): FlowBlo
       attrs = { ...(attrs ?? {}), suppressEmptyParagraphHeight: true };
     }
 
-    return { ...block, runs: inlineRuns, attrs };
+    return { ...block, attrs };
   });
+}
+
+function normalizeTableBlock(block: TableBlock): TableBlock {
+  let changed = false;
+  const rows = block.rows.map((row) => {
+    let rowChanged = false;
+    const cells = row.cells.map((cell) => {
+      const normalizedBlocks = normalizeFlowBlockArray(cell.blocks);
+      const cellChanged = normalizedBlocks.some((normalizedBlock, idx) => normalizedBlock !== cell.blocks[idx]);
+      if (!cellChanged) return cell;
+      rowChanged = true;
+      return { ...cell, blocks: normalizedBlocks };
+    });
+    if (!rowChanged) return row;
+    changed = true;
+    return { ...row, cells };
+  });
+
+  return changed ? { ...block, rows } : block;
 }
 
 // ============================================================================
@@ -289,15 +296,10 @@ export function convertHeaderFooterToContent(
     if (m.kind === 'textBox') return h + m.height;
     return h;
   }, 0);
-  const { visualTop, visualBottom } = calculateHeaderFooterVisualBounds(
-    blocks,
-    measures,
-    totalHeight,
-    metrics
-  );
+  const { visualTop, visualBottom } = calculateHeaderFooterVisualBounds(blocks, measures, totalHeight, metrics);
 
   return {
-    blocks,
+    blocks: blocksForMeasure,
     measures,
     height: totalHeight,
     visualTop,

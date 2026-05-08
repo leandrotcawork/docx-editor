@@ -49,6 +49,8 @@ import type {
   FlowBlock,
   Measure,
   ParagraphBlock,
+  ParagraphMeasure,
+  TableCell,
   TableBlock,
   TableMeasure,
   ImageBlock,
@@ -629,7 +631,41 @@ function computePerBlockWidths(
 // duplicates were drifting from the canonical implementations; sharing
 // keeps them in lockstep across React + Vue adapters.
 
-function measureTableBlock(tableBlock: TableBlock, contentWidth: number): TableMeasure {
+export function measureTableCellBlockVisualHeight(block: FlowBlock, blockMeasure: Measure): number {
+  if (block.kind !== 'paragraph' || blockMeasure.kind !== 'paragraph') {
+    if ('totalHeight' in blockMeasure) return blockMeasure.totalHeight;
+    if ('height' in blockMeasure) return blockMeasure.height;
+    return 0;
+  }
+
+  const paragraphBlock = block as ParagraphBlock;
+  const paragraphMeasure = blockMeasure as ParagraphMeasure;
+  const nonEmptyRuns = paragraphBlock.runs.filter((run) => run.kind !== 'text' || run.text.length > 0);
+  const imageOnlySingleLine =
+    paragraphMeasure.lines.length === 1 &&
+    nonEmptyRuns.length > 0 &&
+    nonEmptyRuns.every((run) => run.kind === 'image');
+
+  if (!imageOnlySingleLine) {
+    return paragraphMeasure.totalHeight;
+  }
+
+  const maxImageHeight = nonEmptyRuns.reduce((maxHeight, run) => {
+    return run.kind === 'image' ? Math.max(maxHeight, run.height) : maxHeight;
+  }, 0);
+  const spacingBefore = paragraphBlock.attrs?.spacing?.before ?? 0;
+  const spacingAfter = paragraphBlock.attrs?.spacing?.after ?? 0;
+
+  return spacingBefore + maxImageHeight + spacingAfter;
+}
+
+function getTableCellVerticalBorderHeight(cell: TableCell | undefined): number {
+  const top = cell?.borders?.top?.width ?? 0;
+  const bottom = cell?.borders?.bottom?.width ?? 0;
+  return top + bottom;
+}
+
+export function measureTableBlock(tableBlock: TableBlock, contentWidth: number): TableMeasure {
   const DEFAULT_CELL_PADDING_X = 7; // Word default: 108 twips ≈ 7px
   const DEFAULT_CELL_PADDING_Y = 0; // OOXML/TableNormal default: top=0, bottom=0
 
@@ -725,6 +761,7 @@ function measureTableBlock(tableBlock: TableBlock, contentWidth: number): TableM
     const row = rows[rowIdx];
     const sourceRowCells = tableBlock.rows[rowIdx]?.cells;
     let maxHeight = 0;
+    let maxVerticalBorderHeight = 0;
     for (let cellIdx = 0; cellIdx < row.cells.length; cellIdx++) {
       const cell = row.cells[cellIdx];
       const sourceCell = sourceRowCells?.[cellIdx];
@@ -733,10 +770,11 @@ function measureTableBlock(tableBlock: TableBlock, contentWidth: number): TableM
       // collapse rules don't apply across the cell-content boundary, so this
       // matches Word's per-cell layout.
       let contentHeight = 0;
-      for (const blockMeasure of cell.blocks) {
-        if ('totalHeight' in blockMeasure) {
-          contentHeight += blockMeasure.totalHeight;
-        }
+      for (let blockIdx = 0; blockIdx < cell.blocks.length; blockIdx++) {
+        const sourceBlock = sourceCell?.blocks[blockIdx];
+        const blockMeasure = cell.blocks[blockIdx];
+        if (!sourceBlock || !blockMeasure) continue;
+        contentHeight += measureTableCellBlockVisualHeight(sourceBlock, blockMeasure);
       }
 
       cell.height = contentHeight;
@@ -744,6 +782,10 @@ function measureTableBlock(tableBlock: TableBlock, contentWidth: number): TableM
       const padBottom = sourceCell?.padding?.bottom ?? DEFAULT_CELL_PADDING_Y;
       cell.height += padTop + padBottom;
       maxHeight = Math.max(maxHeight, cell.height);
+      maxVerticalBorderHeight = Math.max(
+        maxVerticalBorderHeight,
+        getTableCellVerticalBorderHeight(sourceCell)
+      );
     }
 
     // Apply heightRule from the source row
@@ -756,10 +798,10 @@ function measureTableBlock(tableBlock: TableBlock, contentWidth: number): TableM
     } else if (explicitHeight) {
       // Both 'atLeast' and 'auto' (OOXML default) treat the value as minimum height.
       // ECMA-376 §17.4.81: when hRule is absent or "auto", val is the minimum row height.
-      row.height = Math.max(maxHeight, explicitHeight);
+      row.height = Math.max(maxHeight + maxVerticalBorderHeight, explicitHeight);
     } else {
       // No explicit height — use content height directly.
-      row.height = maxHeight;
+      row.height = maxHeight + maxVerticalBorderHeight;
     }
   }
 

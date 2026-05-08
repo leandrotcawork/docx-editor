@@ -276,7 +276,7 @@ function isFieldRun(run: Run): run is FieldRun {
  * Check if text run is empty (only whitespace or no text)
  */
 function isEmptyTextRun(run: TextRun): boolean {
-  return !run.text || run.text.length === 0;
+  return !run.text || run.text.replace(/\u00a0/g, ' ').trim().length === 0;
 }
 
 /**
@@ -455,10 +455,14 @@ export function measureParagraph(
       ...emptyMetrics,
     });
 
+    let emptyTotal = emptyMetrics.lineHeight;
+    if (spacing?.before) emptyTotal += spacing.before;
+    if (spacing?.after) emptyTotal += spacing.after;
+
     return {
       kind: 'paragraph',
       lines,
-      totalHeight: emptyMetrics.lineHeight,
+      totalHeight: emptyTotal,
     };
   }
 

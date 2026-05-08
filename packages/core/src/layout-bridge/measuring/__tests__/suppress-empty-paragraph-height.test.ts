@@ -1,14 +1,13 @@
 /**
- * Regression test for #381 — empty paragraphs flagged with
- * `suppressEmptyParagraphHeight` measure as zero-height anchors.
+ * Regression tests for empty header/footer paragraphs.
  *
- * Used by the HF measurement pipeline to handle the canonical OOXML
- * "trailing empty paragraph after a table" pattern: the paragraph mark
- * exists in the document model but Word renders it as a zero-height
- * anchor, not a full line-height of phantom space.
+ * - #381: structural trailing empty paragraphs after a table can be suppressed
+ *   to zero height when the caller marks them as anchors only.
+ * - Empty paragraphs that still carry explicit spacing must keep that authored
+ *   spacing, even when they arrive as a single empty text run.
  */
 
-import { describe, test, expect } from 'bun:test';
+import { describe, expect, test } from 'bun:test';
 import { measureParagraph } from '../measureParagraph';
 import type { ParagraphBlock } from '../../../layout-engine/types';
 
@@ -21,7 +20,7 @@ function emptyPara(attrs: ParagraphBlock['attrs'] = {}): ParagraphBlock {
   };
 }
 
-describe('measureParagraph — suppressEmptyParagraphHeight (#381)', () => {
+describe('measureParagraph - empty paragraph handling', () => {
   test('empty paragraph without flag uses default empty-line height', () => {
     const measure = measureParagraph(emptyPara(), 600);
     expect(measure.totalHeight).toBeGreaterThan(0);
@@ -38,8 +37,23 @@ describe('measureParagraph — suppressEmptyParagraphHeight (#381)', () => {
     expect(measure.lines[0].descent).toBe(0);
   });
 
-  // Non-empty paragraphs ignore the flag by construction — the
-  // suppress branch is gated on `runs.length === 0`. Not worth a
-  // separate test (would need a Canvas-backed environment for real
-  // text measurement).
+  for (const text of ['', ' ', '\u00a0']) {
+    test(`single visually empty text run (${JSON.stringify(text)}) still preserves explicit spacing before/after`, () => {
+      const measure = measureParagraph(
+        {
+          kind: 'paragraph',
+          id: 'spaced-empty-run',
+          runs: [{ kind: 'text', text }],
+          attrs: {
+            spacing: { before: 8, after: 4 },
+          },
+        } as ParagraphBlock,
+        600
+      );
+
+      expect(measure.lines.length).toBe(1);
+      expect(measure.lines[0].lineHeight).toBeGreaterThan(0);
+      expect(measure.totalHeight).toBeCloseTo(measure.lines[0].lineHeight + 12, 4);
+    });
+  }
 });

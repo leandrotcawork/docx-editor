@@ -73,6 +73,74 @@ describe('#380 — strip inherited spacing, keep inline-explicit spacing', () =>
     const [out] = normalizeHeaderFooterMeasureBlocks([t]);
     expect(out).toBe(t);
   });
+
+  test('inherited spacing is zeroed inside table cell paragraphs too', () => {
+    const t = {
+      ...table(),
+      rows: [
+        {
+          id: 'r1',
+          cells: [
+            {
+              id: 'c1',
+              blocks: [
+                paragraph({
+                  id: 'nested',
+                  attrs: {
+                    spacing: { before: 120, after: 160 },
+                    spacingExplicit: { before: true },
+                  },
+                }),
+              ],
+            },
+          ],
+        },
+      ],
+    } satisfies TableBlock;
+
+    const [out] = normalizeHeaderFooterMeasureBlocks([t]) as [TableBlock];
+    const nested = out.rows[0]?.cells[0]?.blocks[0] as ParagraphBlock;
+    expect(nested.attrs?.spacing?.before).toBe(120);
+    expect(nested.attrs?.spacing?.after).toBeUndefined();
+  });
+
+  test('anchored image runs inside table-cell paragraphs are preserved', () => {
+    const anchoredImage = {
+      kind: 'image' as const,
+      src: 'logo.png',
+      width: 24,
+      height: 24,
+      position: {
+        horizontal: { relativeTo: 'column', posOffset: 0 },
+        vertical: { relativeTo: 'paragraph', posOffset: 0 },
+      },
+    };
+
+    const t = {
+      ...table(),
+      rows: [
+        {
+          id: 'r1',
+          cells: [
+            {
+              id: 'c1',
+              blocks: [
+                paragraph({
+                  id: 'nested-img',
+                  runs: [anchoredImage],
+                }),
+              ],
+            },
+          ],
+        },
+      ],
+    } satisfies TableBlock;
+
+    const [out] = normalizeHeaderFooterMeasureBlocks([t]) as [TableBlock];
+    const nested = out.rows[0]?.cells[0]?.blocks[0] as ParagraphBlock;
+    expect(nested.runs).toHaveLength(1);
+    expect(nested.runs[0]).toEqual(anchoredImage);
+  });
 });
 
 describe('#381 — trailing empty paragraph after a table is zero-height', () => {
