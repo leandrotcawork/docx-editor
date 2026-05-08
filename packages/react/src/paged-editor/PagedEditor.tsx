@@ -640,7 +640,9 @@ export function measureTableCellBlockVisualHeight(block: FlowBlock, blockMeasure
 
   const paragraphBlock = block as ParagraphBlock;
   const paragraphMeasure = blockMeasure as ParagraphMeasure;
-  const nonEmptyRuns = paragraphBlock.runs.filter((run) => run.kind !== 'text' || run.text.length > 0);
+  const nonEmptyRuns = paragraphBlock.runs.filter(
+    (run) => run.kind !== 'text' || run.text.length > 0
+  );
   const imageOnlySingleLine =
     paragraphMeasure.lines.length === 1 &&
     nonEmptyRuns.length > 0 &&

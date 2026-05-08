@@ -1,8 +1,16 @@
 import { describe, expect, test } from 'bun:test';
-import type { FlowBlock, Measure, ParagraphBlock, ParagraphMeasure } from '@eigenpal/docx-core/layout-engine';
+import type {
+  FlowBlock,
+  Measure,
+  ParagraphBlock,
+  ParagraphMeasure,
+} from '@eigenpal/docx-core/layout-engine';
 import { measureTableCellBlockVisualHeight } from './PagedEditor';
 
-function paragraphBlock(runs: ParagraphBlock['runs'], attrs?: ParagraphBlock['attrs']): ParagraphBlock {
+function paragraphBlock(
+  runs: ParagraphBlock['runs'],
+  attrs?: ParagraphBlock['attrs']
+): ParagraphBlock {
   return {
     kind: 'paragraph',
     id: 'p1',
@@ -39,20 +47,18 @@ describe('measureTableCellBlockVisualHeight', () => {
   });
 
   test('uses image height for single-line image-only paragraphs', () => {
-    const block = paragraphBlock(
-      [{ kind: 'image', src: 'logo.png', width: 186, height: 29 }],
-      { spacing: { before: 0, after: 0 } }
-    );
+    const block = paragraphBlock([{ kind: 'image', src: 'logo.png', width: 186, height: 29 }], {
+      spacing: { before: 0, after: 0 },
+    });
     const measure = paragraphMeasure(34.859375, 34.859375);
 
     expect(measureTableCellBlockVisualHeight(block, measure)).toBe(29);
   });
 
   test('preserves explicit spacing around image-only paragraphs', () => {
-    const block = paragraphBlock(
-      [{ kind: 'image', src: 'logo.png', width: 186, height: 29 }],
-      { spacing: { before: 8, after: 4 } }
-    );
+    const block = paragraphBlock([{ kind: 'image', src: 'logo.png', width: 186, height: 29 }], {
+      spacing: { before: 8, after: 4 },
+    });
     const measure = paragraphMeasure(40, 40);
 
     expect(measureTableCellBlockVisualHeight(block, measure)).toBe(41);
