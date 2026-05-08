@@ -17,6 +17,7 @@ import { Selection, type Command } from 'prosemirror-state';
 import { Decoration, DecorationSet } from 'prosemirror-view';
 import {
   columnResizing,
+  columnResizingPluginKey,
   tableEditing,
   mergeCells as pmMergeCells,
   splitCell as pmSplitCell,
@@ -26,6 +27,13 @@ import { createNodeExtension, createExtension } from '../create';
 import type { ExtensionContext, ExtensionRuntime, AnyExtension } from '../types';
 import type { TableAttrs, TableRowAttrs, TableCellAttrs } from '../../schema/nodes';
 import type { ColorValue, BorderSpec } from '../../../types/colors';
+import {
+  distributeTwipsFromPixelWeights,
+  getCellColumnStartIndexes,
+  getFirstRowColwidths,
+  getFixedTableTargetPx,
+  normalizeFixedResizeWidths,
+} from './tableFixedResizeUtils';
 
 // ============================================================================
 // CSS PASTE HELPERS — Extract formatting from inline styles (Google Docs, etc.)
@@ -159,9 +167,16 @@ function parseCellAttrsFromDOM(element: HTMLTableCellElement): TableCellAttrs {
   const style = element.style;
   const borders = extractCellBordersFromCSS(style);
   const margins = extractCellMarginsFromCSS(style);
+  const colwidth = element.dataset.colwidth
+    ? element.dataset.colwidth
+        .split(',')
+        .map((value) => Number.parseInt(value, 10))
+        .filter((value) => Number.isFinite(value))
+    : undefined;
   return {
     colspan: element.colSpan || 1,
     rowspan: element.rowSpan || 1,
+    colwidth: colwidth && colwidth.length > 0 ? colwidth : undefined,
     verticalAlign:
       (element.dataset.valign as TableCellAttrs['verticalAlign']) ||
       mapCssVerticalAlign(style.verticalAlign) ||
@@ -412,6 +427,9 @@ const tableCellSpec: NodeSpec = {
 
     if (attrs.colspan > 1) domAttrs.colspan = String(attrs.colspan);
     if (attrs.rowspan > 1) domAttrs.rowspan = String(attrs.rowspan);
+    if (attrs.colwidth && attrs.colwidth.length > 0) {
+      domAttrs['data-colwidth'] = attrs.colwidth.join(',');
+    }
 
     const styles: string[] = [];
     styles.push(...buildCellPaddingStyles(attrs));
@@ -471,6 +489,9 @@ const tableHeaderSpec: NodeSpec = {
 
     if (attrs.colspan > 1) domAttrs.colspan = String(attrs.colspan);
     if (attrs.rowspan > 1) domAttrs.rowspan = String(attrs.rowspan);
+    if (attrs.colwidth && attrs.colwidth.length > 0) {
+      domAttrs['data-colwidth'] = attrs.colwidth.join(',');
+    }
 
     const styles: string[] = ['font-weight: bold'];
     styles.push(...buildCellPaddingStyles(attrs));
@@ -797,6 +818,83 @@ export const TablePluginExtension = createExtension({
         return false;
       };
     }
+
+    function applyColumnWidthsToTable(tr: Transaction, tablePos: number, widthsPx: number[]) {
+      let nextTr = tr;
+      const table = tr.doc.nodeAt(tablePos);
+      if (!table || table.type.name !== 'table') return nextTr;
+      const tableWidthTwips = table.attrs.width as number | null;
+      if (typeof tableWidthTwips !== 'number') return nextTr;
+
+      const columnWidthsTwips = distributeTwipsFromPixelWeights(widthsPx, tableWidthTwips);
+      const rowColumnStarts = getCellColumnStartIndexes(table);
+
+      let rowPos = tablePos + 1;
+      let rowIndex = 0;
+      table.forEach((row) => {
+        if (row.type.name === 'tableRow') {
+          let cellPos = rowPos + 1;
+          let cellIndex = 0;
+          row.forEach((cell) => {
+            if (cell.type.name === 'tableCell' || cell.type.name === 'tableHeader') {
+              const columnIndex = rowColumnStarts[rowIndex]?.[cellIndex] ?? 0;
+              const colspan = (cell.attrs.colspan as number) || 1;
+              const colwidth = widthsPx.slice(columnIndex, columnIndex + colspan);
+              const widthTwips = columnWidthsTwips
+                .slice(columnIndex, columnIndex + colspan)
+                .reduce((sum, width) => sum + width, 0);
+              nextTr = nextTr.setNodeMarkup(cellPos, undefined, {
+                ...cell.attrs,
+                width: widthTwips,
+                widthType: 'dxa',
+                colwidth,
+              });
+              cellIndex++;
+            }
+            cellPos += cell.nodeSize;
+          });
+          rowIndex++;
+        }
+        rowPos += row.nodeSize;
+      });
+
+      return nextTr.setNodeMarkup(tablePos, undefined, {
+        ...table.attrs,
+        columnWidths: columnWidthsTwips,
+      });
+    }
+
+    const fixedResizeNormalizerKey = new PluginKey('fixedTableResizeNormalizer');
+    const fixedResizeNormalizerPlugin = new Plugin({
+      key: fixedResizeNormalizerKey,
+      appendTransaction(transactions, oldState, newState) {
+        if (!transactions.some((tr) => tr.docChanged)) return null;
+        if (transactions.some((tr) => tr.getMeta(fixedResizeNormalizerKey))) return null;
+
+        let tr = newState.tr;
+        let changed = false;
+
+        newState.doc.descendants((node, pos) => {
+          if (node.type.name !== 'table') return true;
+
+          const targetTotal = getFixedTableTargetPx(node);
+          const currentWidths = targetTotal ? getFirstRowColwidths(node) : null;
+          if (!targetTotal || !currentWidths) return true;
+
+          const previousTable = oldState.doc.nodeAt(pos);
+          const previousWidths =
+            previousTable?.type.name === 'table' ? getFirstRowColwidths(previousTable) : null;
+          const normalized = normalizeFixedResizeWidths(previousWidths, currentWidths, targetTotal);
+          if (!normalized) return true;
+
+          tr = applyColumnWidthsToTable(tr, pos, normalized);
+          changed = true;
+          return false;
+        });
+
+        return changed ? tr.setMeta(fixedResizeNormalizerKey, true) : null;
+      },
+    });
 
     function buildCellAttrsFromTemplate(
       templateCell: PMNode | null,
@@ -2334,6 +2432,9 @@ export const TablePluginExtension = createExtension({
       key: activeCellKey,
       props: {
         decorations(state) {
+          const resizeState = columnResizingPluginKey.getState(state);
+          if ((resizeState?.activeHandle ?? -1) > -1) return DecorationSet.empty;
+
           const { selection } = state;
           // Skip if already a CellSelection (prosemirror-tables handles that)
           if (selection instanceof CellSelection) return DecorationSet.empty;
@@ -2361,6 +2462,7 @@ export const TablePluginExtension = createExtension({
           lastColumnResizable: true,
         }),
         tableEditing(),
+        fixedResizeNormalizerPlugin,
         activeCellPlugin,
       ],
       keyboardShortcuts: {
